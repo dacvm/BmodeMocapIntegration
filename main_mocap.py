@@ -74,6 +74,8 @@ class Mocap3DCanvas(FigureCanvas):
         # Build the figure and axes once so we can update without clearing every frame.
         figure = Figure()
         axes = figure.add_subplot(111, projection="3d")
+        # UI state change: enable tight layout so axis labels are not clipped in embedded Qt layouts.
+        figure.set_tight_layout(True)
         super().__init__(figure)
 
         # Keep a reference to the axes for fast updates later.
@@ -84,6 +86,20 @@ class Mocap3DCanvas(FigureCanvas):
 
         # Track text labels so each point can show its rigid body name.
         self._label_texts: list = []
+        # Keep one quiver artist per axis so we can replace orientation arrows per frame.
+        self._axis_quivers: list = []
+        # Keep one quiver artist per axis for the world origin reference frame.
+        self._origin_axis_quivers: list = []
+        # Keep local-axis arrows at a fixed world length so orientation remains readable.
+        self._axis_length_mm = 50.0
+        # Use a compact arrowhead to reduce clutter when many rigid bodies are visible.
+        self._axis_arrow_ratio = 0.25
+        # Keep axis colors consistent with robotics convention (X=red, Y=green, Z=blue).
+        self._axis_colors = {"x": "red", "y": "green", "z": "blue"}
+        # Keep a persistent point marker at the world origin for orientation context.
+        self._origin_point = self._axes.scatter(
+            [0.0], [0.0], [0.0], s=30, c="black", depthshade=False
+        )
 
         # Label axes so users know the coordinate directions (Z is up after the base transform).
         self._axes.set_xlabel("X")
@@ -99,6 +115,8 @@ class Mocap3DCanvas(FigureCanvas):
 
         # UI state change: lock the plot to a fixed world box so live points stay in a stable frame.
         self._apply_fixed_bounds()
+        # Draw the global origin frame once so users always have a fixed reference axis.
+        self._draw_origin_reference_axes()
 
         # Ensure the canvas is parented to the widget tree if provided.
         if parent is not None:
@@ -136,6 +154,134 @@ class Mocap3DCanvas(FigureCanvas):
             self._label_texts.append(text_artist)
 
     # Summary:
+    # - Remove all current orientation quiver artists from the 3D axes.
+    # - Input: `self`.
+    # - Returns: None.
+    def _clear_axis_quivers(self) -> None:
+        # Remove quivers before re-drawing so old orientations never linger on screen.
+        while self._axis_quivers:
+            quiver_artist = self._axis_quivers.pop()
+            # Defensive cleanup: if Matplotlib already detached an artist, ignore the remove failure.
+            try:
+                quiver_artist.remove()
+            except ValueError:
+                pass
+
+    # Summary:
+    # - Draw a fixed world-origin axis triad that stays visible in idle and streaming states.
+    # - Input: `self`.
+    # - Returns: None.
+    def _draw_origin_reference_axes(self) -> None:
+        # Remove old origin-axis artists first in case this helper is called more than once.
+        while self._origin_axis_quivers:
+            origin_axis_artist = self._origin_axis_quivers.pop()
+            # Defensive cleanup: ignore remove errors when Matplotlib already detached the artist.
+            try:
+                origin_axis_artist.remove()
+            except ValueError:
+                pass
+
+        # Keep a single static origin point so the world frame anchor is always visible.
+        self._origin_point._offsets3d = ([0.0], [0.0], [0.0])
+        # Build fixed direction vectors for the world origin frame in the plot coordinate system.
+        origin_x_values = [0.0]
+        origin_y_values = [0.0]
+        origin_z_values = [0.0]
+        # Draw the world X axis (red) with the same scale as rigid-body local axes.
+        self._origin_axis_quivers.append(
+            self._axes.quiver(
+                origin_x_values,
+                origin_y_values,
+                origin_z_values,
+                [1.0],
+                [0.0],
+                [0.0],
+                length=self._axis_length_mm,
+                normalize=True,
+                color=self._axis_colors["x"],
+                arrow_length_ratio=self._axis_arrow_ratio,
+            )
+        )
+        # Draw the world Y axis (green) with the same scale as rigid-body local axes.
+        self._origin_axis_quivers.append(
+            self._axes.quiver(
+                origin_x_values,
+                origin_y_values,
+                origin_z_values,
+                [0.0],
+                [1.0],
+                [0.0],
+                length=self._axis_length_mm,
+                normalize=True,
+                color=self._axis_colors["y"],
+                arrow_length_ratio=self._axis_arrow_ratio,
+            )
+        )
+        # Draw the world Z axis (blue) with the same scale as rigid-body local axes.
+        self._origin_axis_quivers.append(
+            self._axes.quiver(
+                origin_x_values,
+                origin_y_values,
+                origin_z_values,
+                [0.0],
+                [0.0],
+                [1.0],
+                length=self._axis_length_mm,
+                normalize=True,
+                color=self._axis_colors["z"],
+                arrow_length_ratio=self._axis_arrow_ratio,
+            )
+        )
+
+    # Summary:
+    # - Convert a transformed 4x4 pose into quiver origin and local X/Y/Z axis vectors.
+    # - Input: `self`, `pose_plot` (np.ndarray).
+    # - Returns: `(origin, x_axis, y_axis, z_axis)` when finite and drawable, otherwise `None`.
+    def _collect_axis_vectors_from_pose(
+        self, pose_plot: np.ndarray
+    ) -> Optional[
+        tuple[
+            tuple[float, float, float],
+            tuple[float, float, float],
+            tuple[float, float, float],
+            tuple[float, float, float],
+        ]
+    ]:
+        # Validation/transforms: only 4x4 finite poses can be safely converted to orientation arrows.
+        if not isinstance(pose_plot, np.ndarray) or pose_plot.shape != (4, 4):
+            return None
+
+        # Read the point origin and local basis vectors directly from the homogeneous transform.
+        origin_vector = pose_plot[:3, 3]
+        x_axis_vector = pose_plot[:3, 0]
+        y_axis_vector = pose_plot[:3, 1]
+        z_axis_vector = pose_plot[:3, 2]
+
+        # Validation/transforms: skip arrows when any origin or axis component is non-finite.
+        if not (
+            np.isfinite(origin_vector).all()
+            and np.isfinite(x_axis_vector).all()
+            and np.isfinite(y_axis_vector).all()
+            and np.isfinite(z_axis_vector).all()
+        ):
+            return None
+
+        # Validation/transforms: skip degenerate axes to avoid undefined arrow directions.
+        if (
+            np.linalg.norm(x_axis_vector) <= 1e-12
+            or np.linalg.norm(y_axis_vector) <= 1e-12
+            or np.linalg.norm(z_axis_vector) <= 1e-12
+        ):
+            return None
+
+        return (
+            (float(origin_vector[0]), float(origin_vector[1]), float(origin_vector[2])),
+            (float(x_axis_vector[0]), float(x_axis_vector[1]), float(x_axis_vector[2])),
+            (float(y_axis_vector[0]), float(y_axis_vector[1]), float(y_axis_vector[2])),
+            (float(z_axis_vector[0]), float(z_axis_vector[1]), float(z_axis_vector[2])),
+        )
+
+    # Summary:
     # - Update the scatter points using the latest QTM poses.
     # - Input: `self`, `poses_qtm` (dict[str, np.ndarray | None]).
     # - Returns: None.
@@ -154,6 +300,11 @@ class Mocap3DCanvas(FigureCanvas):
         x_values: list[float] = []
         y_values: list[float] = []
         z_values: list[float] = []
+        # Collect per-body local axes so we can draw quivers after scatter updates.
+        axis_origins: list[tuple[float, float, float]] = []
+        x_axis_values: list[tuple[float, float, float]] = []
+        y_axis_values: list[tuple[float, float, float]] = []
+        z_axis_values: list[tuple[float, float, float]] = []
 
         # Convert each pose into scatter arrays while keeping insertion order.
         for index, (label, pose_qtm) in enumerate(poses_qtm.items()):
@@ -192,12 +343,81 @@ class Mocap3DCanvas(FigureCanvas):
                 # Keep labels horizontal by avoiding a 3D direction alignment.
                 label_artist.set_3d_properties(float(z_value), zdir=None)
                 label_artist.set_visible(True)
+                # Validation/transforms: only store orientation vectors when the full pose is drawable.
+                axis_vectors = self._collect_axis_vectors_from_pose(pose_plot)
+                if axis_vectors is not None:
+                    origin_value, x_axis_value, y_axis_value, z_axis_value = axis_vectors
+                    axis_origins.append(origin_value)
+                    x_axis_values.append(x_axis_value)
+                    y_axis_values.append(y_axis_value)
+                    z_axis_values.append(z_axis_value)
             else:
                 # Hide the label when the values are not finite.
                 label_artist.set_visible(False)
 
         # Update the existing scatter in place instead of recreating it.
         self._scatter._offsets3d = (x_values, y_values, z_values)
+        # Remove old orientation arrows before drawing the latest frame's quivers.
+        self._clear_axis_quivers()
+        # Draw local X/Y/Z axes for each visible rigid body using one quiver call per axis/color.
+        if axis_origins:
+            origin_x_values = [origin[0] for origin in axis_origins]
+            origin_y_values = [origin[1] for origin in axis_origins]
+            origin_z_values = [origin[2] for origin in axis_origins]
+            x_u_values = [axis[0] for axis in x_axis_values]
+            x_v_values = [axis[1] for axis in x_axis_values]
+            x_w_values = [axis[2] for axis in x_axis_values]
+            y_u_values = [axis[0] for axis in y_axis_values]
+            y_v_values = [axis[1] for axis in y_axis_values]
+            y_w_values = [axis[2] for axis in y_axis_values]
+            z_u_values = [axis[0] for axis in z_axis_values]
+            z_v_values = [axis[1] for axis in z_axis_values]
+            z_w_values = [axis[2] for axis in z_axis_values]
+            # Orientation quiver: local X (red) axis for all rigid bodies in the current frame.
+            self._axis_quivers.append(
+                self._axes.quiver(
+                    origin_x_values,
+                    origin_y_values,
+                    origin_z_values,
+                    x_u_values,
+                    x_v_values,
+                    x_w_values,
+                    length=self._axis_length_mm,
+                    normalize=True,
+                    color=self._axis_colors["x"],
+                    arrow_length_ratio=self._axis_arrow_ratio,
+                )
+            )
+            # Orientation quiver: local Y (green) axis for all rigid bodies in the current frame.
+            self._axis_quivers.append(
+                self._axes.quiver(
+                    origin_x_values,
+                    origin_y_values,
+                    origin_z_values,
+                    y_u_values,
+                    y_v_values,
+                    y_w_values,
+                    length=self._axis_length_mm,
+                    normalize=True,
+                    color=self._axis_colors["y"],
+                    arrow_length_ratio=self._axis_arrow_ratio,
+                )
+            )
+            # Orientation quiver: local Z (blue) axis for all rigid bodies in the current frame.
+            self._axis_quivers.append(
+                self._axes.quiver(
+                    origin_x_values,
+                    origin_y_values,
+                    origin_z_values,
+                    z_u_values,
+                    z_v_values,
+                    z_w_values,
+                    length=self._axis_length_mm,
+                    normalize=True,
+                    color=self._axis_colors["z"],
+                    arrow_length_ratio=self._axis_arrow_ratio,
+                )
+            )
 
         # Request a redraw without blocking the UI thread.
         self.draw_idle()
@@ -209,6 +429,10 @@ class Mocap3DCanvas(FigureCanvas):
     def clear_points(self) -> None:
         # Empty the scatter data so the plot visibly clears on stop.
         self._scatter._offsets3d = ([], [], [])
+        # Clear local-axis quivers so stop/start cycles never show stale orientation arrows.
+        self._clear_axis_quivers()
+        # Keep the origin point and global origin axis visible even when stream data is cleared.
+        self._draw_origin_reference_axes()
         # Hide labels so the cleared plot has no lingering text.
         for label_artist in self._label_texts:
             label_artist.set_visible(False)
@@ -533,11 +757,13 @@ class CsvRecordWorker:
                     row.extend([RECORD_NAN] * 7)
                     continue
 
-                rotation_3x3 = [
-                    rotation_values[0:3],
-                    rotation_values[3:6],
-                    rotation_values[6:9],
-                ]
+                # QTM packs Rot[0..8] column-wise, so we must reshape with Fortran order.
+                # Reference: https://docs.qualisys.com/qtm/content/processing_measurement/6dof_data_format.htm
+                rotation_3x3 = (
+                    np.array(rotation_values, dtype=float)
+                    .reshape((3, 3), order="F")
+                    .tolist()
+                )
                 quat = self._rotation_matrix_to_quaternion(rotation_3x3)
 
                 # Optional sign continuity to avoid sudden sign flips per body.
@@ -909,8 +1135,9 @@ class QtmStreamWorker:
                 poses[name] = None
                 continue
 
-            # QTM delivers r11..r33 in row-major order; reshape in C-order for consistency.
-            rotation_3x3 = np.array(rotation_values, dtype=float).reshape((3, 3))
+            # QTM packs Rot[0..8] column-wise, so reshape with Fortran order.
+            # Reference: https://docs.qualisys.com/qtm/content/processing_measurement/6dof_data_format.htm
+            rotation_3x3 = np.array(rotation_values, dtype=float).reshape((3, 3), order="F")
 
             # Assemble the homogeneous transform in QTM's raw coordinate frame.
             pose_matrix = np.eye(4, dtype=float)

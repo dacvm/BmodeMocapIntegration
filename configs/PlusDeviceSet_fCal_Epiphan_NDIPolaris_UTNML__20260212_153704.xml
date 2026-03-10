@@ -1486,7 +1486,7 @@
     Interpolation="LINEAR"
     Optimization="FULL"
     CompoundingMode="MAXIMUM"
-    FillHoles="ON" />
+    />
   <fCal
     PhantomModelId="PhantomModel"
     ReconstructedVolumeId="Volume"
