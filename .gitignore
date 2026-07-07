@@ -6,3 +6,4 @@ __pycache__/
 *.pyo
 *.pyc.*
 *.pyo.*
+AGENTS.md

@@ -1,5 +1,11 @@
 # AGENTS.md (PySide6 conventions)
 
+## Python environment
+- This project uses a conda environment named `learning_pyside6`.
+- For all Python commands, use:
+```powershell
+conda run -n learning_pyside6 python```
+
 ## IMPORTANT list
 - NEVER change or update any file ended with `_ui.py`
 
