@@ -62,7 +62,10 @@ class CoupledStreamController(QObject):
     # - Returns: None.
     def start_recording(self) -> None:
         # UI-state style change: arm the coupler so incoming image packets are processed.
+        # This will allow the gate keeper (see _on_coupledStreamController_image_packet)
+        # process the coupled recording.
         self._is_recording = True
+
         # Reset counters at each session start so stats are session-local.
         self._count_coupled = 0
         self._count_dropped_no_pose = 0
@@ -109,7 +112,12 @@ class CoupledStreamController(QObject):
     def _on_coupledStreamController_rigidbody_packet(
         self, rigidbody_ts_ms: int, rigidbody_data: object
     ) -> None:
-        # Cache each mocap sample in a bounded deque so lookup stays lightweight.
+        # Keep the mocap buffer updated even when recording is not active.
+        # The image packet is the event that creates a coupled record (see function below), 
+        # so the gate lives in the image slot. Mocap packets are only cached here as recent 
+        # lookup data. This keeps the buffer "warm" during live preview, so the first image 
+        # after the user presses Record can immediately find a recent pose instead of waiting for
+        # a new mocap packet. The deque maxlen still prevents memory from growing forever.
         self._mocap_buf.append((int(rigidbody_ts_ms), rigidbody_data))
 
     # Summary:
@@ -123,7 +131,12 @@ class CoupledStreamController(QObject):
     def _on_coupledStreamController_image_packet(
         self, image_ts_ms: int, image_data: object
     ) -> None:
-        # Respect recording gate so coupling work only happens during active sessions.
+        # Gate image-triggered coupling so live preview does not become a recording.
+        # The signal connections are active as long as the streams are running, so image
+        # packets can arrive before the user presses Record. Without this guard, every
+        # preview image would search the mocap buffer, emit coupled packets, update
+        # counters, and possibly reach downstream writers. The gate keeps recording
+        # session data intentional while still allowing mocap data to stay ready.
         if not self._is_recording:
             return
 
