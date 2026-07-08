@@ -40,8 +40,10 @@ class CoupledStreamController(QObject):
         # Keep a bounded history of recent rigid body packets for reverse scan matching.
         self._mocap_buf: deque[tuple[int, Any]] = deque(maxlen=buffer_maxlen)
 
-        # Recording gate: when False, image packets are ignored by the coupler.
+        # Recording gate: when False, image packets are ignored unless a snapshot is pending.
         self._is_recording = False
+        # Snapshot gate: allows exactly one valid image-triggered coupling attempt to emit.
+        self._is_snapshot_pending = False
 
         # Counters for coupled and dropped packets, exposed via `sig_stats`.
         self._count_coupled = 0
@@ -62,9 +64,11 @@ class CoupledStreamController(QObject):
     # - Returns: None.
     def start_recording(self) -> None:
         # UI-state style change: arm the coupler so incoming image packets are processed.
-        # This will allow the gate keeper (see _on_coupledStreamController_image_packet)
-        # process the coupled recording.
+        # This lets the gatekeeper in _on_coupledStreamController_image_packet create
+        # coupled packets for continuous recording.
         self._is_recording = True
+        # Clear any stale one-shot request because continuous recording now owns the gate.
+        self._is_snapshot_pending = False
 
         # Reset counters at each session start so stats are session-local.
         self._count_coupled = 0
@@ -83,6 +87,34 @@ class CoupledStreamController(QObject):
         self._emit_stats()
 
     # Summary:
+    # - Request exactly one valid coupled packet without starting continuous recording.
+    # - What it does: arms the snapshot gate, resets counters for this one-shot attempt,
+    #   and lets the next valid image packet trigger coupling.
+    # - Input: `self`.
+    # - Returns: None.
+    def request_snapshot(self) -> None:
+        # Snapshot gate: keep continuous recording off but allow one image-triggered coupling.
+        self._is_snapshot_pending = True
+        # Reset counters so timeout/debug messages describe this snapshot attempt only.
+        self._count_coupled = 0
+        self._count_dropped_no_pose = 0
+        self._count_dropped_stale = 0
+        self._emit_stats()
+
+    # Summary:
+    # - Cancel a pending one-shot snapshot request.
+    # - What it does: clears the snapshot gate so preview image packets are ignored again.
+    # - Input: `self`.
+    # - Returns: None.
+    def cancel_snapshot(self) -> None:
+        # No-op when there is no pending request so timeout cleanup stays idempotent.
+        if not self._is_snapshot_pending:
+            return
+        # Snapshot gate: disarm the one-shot request after timeout or explicit cancellation.
+        self._is_snapshot_pending = False
+        self._emit_stats()
+
+    # Summary:
     # - Build and emit current coupling counters.
     # - What it does: sends a small stats dictionary for UI/log visibility.
     # - Input: `self`.
@@ -97,6 +129,7 @@ class CoupledStreamController(QObject):
                 "count_dropped_stale": self._count_dropped_stale,
                 "mocap_buffer_size": len(self._mocap_buf),
                 "maxdiff_imagepose_ms": self._maxdiff_imagepose_ms,
+                "is_snapshot_pending": self._is_snapshot_pending,
             }
         )
 
@@ -113,9 +146,9 @@ class CoupledStreamController(QObject):
         self, rigidbody_ts_ms: int, rigidbody_data: object
     ) -> None:
         # Keep the mocap buffer updated even when recording is not active.
-        # The image packet is the event that creates a coupled record (see function below), 
-        # so the gate lives in the image slot. Mocap packets are only cached here as recent 
-        # lookup data. This keeps the buffer "warm" during live preview, so the first image 
+        # The image packet is the event that creates a coupled record (see function below),
+        # so the gate lives in the image slot. Mocap packets are only cached here as recent
+        # lookup data. This keeps the buffer "warm" during live preview, so the first image
         # after the user presses Record can immediately find a recent pose instead of waiting for
         # a new mocap packet. The deque maxlen still prevents memory from growing forever.
         self._mocap_buf.append((int(rigidbody_ts_ms), rigidbody_data))
@@ -136,8 +169,9 @@ class CoupledStreamController(QObject):
         # packets can arrive before the user presses Record. Without this guard, every
         # preview image would search the mocap buffer, emit coupled packets, update
         # counters, and possibly reach downstream writers. The gate keeps recording
-        # session data intentional while still allowing mocap data to stay ready.
-        if not self._is_recording:
+        # session data intentional while still allowing mocap data to stay ready. Snapshot
+        # requests use their own one-shot gate so the same matching logic can write one frame.
+        if not self._is_recording and not self._is_snapshot_pending:
             return
 
         selected_rigidbody_ts_ms = None
@@ -171,8 +205,12 @@ class CoupledStreamController(QObject):
             self._emit_stats()
             return
 
-        # Accept and emit the coupled packet for downstream recording.
+        # Accept and emit the coupled packet for downstream recording or one-shot snapshot.
         self._count_coupled += 1
+        # Snapshot gate: consume the one-shot request before emitting so only this valid
+        # packet can reach downstream snapshot storage.
+        if self._is_snapshot_pending:
+            self._is_snapshot_pending = False
         self.sig_coupled_packet.emit(
             int(image_ts_ms),
             image_data,

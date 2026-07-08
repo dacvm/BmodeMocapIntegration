@@ -1876,6 +1876,76 @@ class BModeWidget(QWidget):
         # Enqueue the snapshot without blocking the UI thread.
         self._image_record_worker.handle_frame(snapshot_packet)
 
+    # Summary:
+    # - Save one externally-controlled image snapshot directly to disk.
+    # - What it does: Creates a B-mode session folder, validates one frame packet, encodes it
+    #   with the same JPEG settings as continuous recording, and writes one image file.
+    # - Input: `self`, `record_dir` (str), `ts_ms` (int), `image_data` (object).
+    # - Returns: Full JPEG output path (str).
+    def save_external_image_snapshot(
+        self, record_dir: str, ts_ms: int, image_data: object
+    ) -> str:
+        # Normalize/create the parent directory so snapshot output has a stable target.
+        normalized_record_dir = os.path.abspath(os.path.expanduser(str(record_dir)))
+        os.makedirs(normalized_record_dir, exist_ok=True)
+
+        # Reuse the existing B-mode session-folder convention under the coupled session.
+        session_dir = ImageRecordWorker._build_session_dir(normalized_record_dir)
+        os.makedirs(session_dir, exist_ok=True)
+
+        # Validation/transform: accept the same FramePacket-style payload used by streaming.
+        width = getattr(image_data, "width", None)
+        height = getattr(image_data, "height", None)
+        data_obj = getattr(image_data, "data", None)
+        try:
+            width_int = int(width)
+            height_int = int(height)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Snapshot image dimensions are missing or invalid") from exc
+        if width_int <= 0 or height_int <= 0:
+            raise ValueError("Snapshot image dimensions must be positive")
+
+        # Validation/transform: convert raw bytes-like payloads into the grayscale frame buffer.
+        if isinstance(data_obj, memoryview):
+            frame_bytes = data_obj.tobytes()
+        elif isinstance(data_obj, (bytes, bytearray)):
+            frame_bytes = bytes(data_obj)
+        else:
+            raise ValueError("Snapshot image payload is not bytes-like")
+
+        expected_size = width_int * height_int
+        if len(frame_bytes) < expected_size:
+            raise ValueError("Snapshot image payload is incomplete")
+
+        try:
+            gray = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(
+                (height_int, width_int)
+            )
+        except ValueError as exc:
+            raise ValueError("Snapshot image payload could not be decoded") from exc
+
+        # Encode with the same JPEG quality as the continuous image recorder.
+        ok, buffer = cv2.imencode(
+            ".jpg",
+            gray,
+            [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY],
+        )
+        if not ok:
+            raise IOError("Snapshot JPEG encoding failed")
+
+        # Store the snapshot using the same frame filename pattern as continuous recording.
+        output_path = os.path.join(session_dir, f"frame_000000_{int(ts_ms)}.jpg")
+        with open(output_path, "wb") as file_handle:
+            file_handle.write(buffer.tobytes())
+
+        # Log the direct snapshot path so externally-controlled output remains visible.
+        self._log_bmode_event(
+            "snapshot_saved",
+            level="INFO",
+            target=output_path,
+        )
+        return output_path
+
     # Summary: Start streaming based on the selected stream option.
     # What it does: Chooses camera streaming or screen streaming, then starts the appropriate worker.
     # Input: `self`.
