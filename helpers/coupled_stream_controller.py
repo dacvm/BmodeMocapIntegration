@@ -98,8 +98,11 @@ class CoupledStreamController(QObject):
         )
 
     # Summary:
-    # - Slot function that receives rigid body packets and appends them to the ring buffer.
-    # - What it does: keeps only the newest bounded history for reverse sample-and-hold lookup.
+    # - Slot function that receives rigid body packets and appends them to the rolling buffer.
+    # - What it does: stores recent Qualisys/QTM rigid body samples so later image packets can
+    #   find the newest pose at-or-before the image timestamp. Rigid body packets can arrive
+    #   faster or more often than ultrasound image packets, so this slot does not perform the
+    #   coupling itself; it only keeps a bounded history of mocap data for lookup.
     # - Input: `self`, `rigidbody_ts_ms` (int), `rigidbody_data` (object).
     # - Returns: None.
     @Slot(int, object)
@@ -110,9 +113,10 @@ class CoupledStreamController(QObject):
         self._mocap_buf.append((int(rigidbody_ts_ms), rigidbody_data))
 
     # Summary:
-    # - Slot function that receives image packets and tries sample-and-hold coupling.
-    # - What it does: selects the newest rigid body sample with ts <= image ts, validates
-    #   age via `maxdiff_imagepose_ms`, and emits an accepted coupled packet.
+    # - Slot function that receives image packets and performs the actual image-to-mocap coupling.
+    # - What it does: treats each image packet as the trigger for one coupling attempt, searches
+    #   the rolling rigid body buffer, selects the newest rigid body sample with ts <= image ts,
+    #   validates its age via `maxdiff_imagepose_ms`, and emits an accepted coupled packet.
     # - Input: `self`, `image_ts_ms` (int), `image_data` (object).
     # - Returns: None.
     @Slot(int, object)

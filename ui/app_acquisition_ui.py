@@ -89,29 +89,10 @@ class Ui_MainWindow(object):
 
         self.gridLayout.addWidget(self.label_status_mocap, 1, 1, 1, 1)
 
-        self.pushButton_coupledrecord_recorddirClear = QPushButton(self.groupBox_3)
-        self.pushButton_coupledrecord_recorddirClear.setObjectName(u"pushButton_coupledrecord_recorddirClear")
-        icon = QIcon(QIcon.fromTheme(QIcon.ThemeIcon.EditClear))
-        self.pushButton_coupledrecord_recorddirClear.setIcon(icon)
-
-        self.gridLayout.addWidget(self.pushButton_coupledrecord_recorddirClear, 0, 4, 1, 1)
-
-        self.lineEdit_coupledrecord_recorddir = QLineEdit(self.groupBox_3)
-        self.lineEdit_coupledrecord_recorddir.setObjectName(u"lineEdit_coupledrecord_recorddir")
-
-        self.gridLayout.addWidget(self.lineEdit_coupledrecord_recorddir, 0, 3, 1, 1)
-
         self.label_1 = QLabel(self.groupBox_3)
         self.label_1.setObjectName(u"label_1")
 
         self.gridLayout.addWidget(self.label_1, 0, 0, 1, 1)
-
-        self.pushButton_coupledrecord_recorddirBrowse = QPushButton(self.groupBox_3)
-        self.pushButton_coupledrecord_recorddirBrowse.setObjectName(u"pushButton_coupledrecord_recorddirBrowse")
-        icon1 = QIcon(QIcon.fromTheme(QIcon.ThemeIcon.FolderOpen))
-        self.pushButton_coupledrecord_recorddirBrowse.setIcon(icon1)
-
-        self.gridLayout.addWidget(self.pushButton_coupledrecord_recorddirBrowse, 0, 5, 1, 1)
 
         self.label_3 = QLabel(self.groupBox_3)
         self.label_3.setObjectName(u"label_3")
@@ -134,13 +115,48 @@ class Ui_MainWindow(object):
 
         self.gridLayout.addLayout(self.horizontalLayout_4, 1, 3, 1, 1)
 
+        self.horizontalLayout_5 = QHBoxLayout()
+        self.horizontalLayout_5.setObjectName(u"horizontalLayout_5")
+        self.lineEdit_coupledrecord_recorddir = QLineEdit(self.groupBox_3)
+        self.lineEdit_coupledrecord_recorddir.setObjectName(u"lineEdit_coupledrecord_recorddir")
+
+        self.horizontalLayout_5.addWidget(self.lineEdit_coupledrecord_recorddir)
+
+        self.pushButton_coupledrecord_recorddirClear = QPushButton(self.groupBox_3)
+        self.pushButton_coupledrecord_recorddirClear.setObjectName(u"pushButton_coupledrecord_recorddirClear")
+        icon = QIcon(QIcon.fromTheme(QIcon.ThemeIcon.EditClear))
+        self.pushButton_coupledrecord_recorddirClear.setIcon(icon)
+
+        self.horizontalLayout_5.addWidget(self.pushButton_coupledrecord_recorddirClear)
+
+
+        self.gridLayout.addLayout(self.horizontalLayout_5, 0, 3, 1, 1)
+
+        self.pushButton_coupledrecord_recorddirBrowse = QPushButton(self.groupBox_3)
+        self.pushButton_coupledrecord_recorddirBrowse.setObjectName(u"pushButton_coupledrecord_recorddirBrowse")
+        icon1 = QIcon(QIcon.fromTheme(QIcon.ThemeIcon.FolderOpen))
+        self.pushButton_coupledrecord_recorddirBrowse.setIcon(icon1)
+
+        self.gridLayout.addWidget(self.pushButton_coupledrecord_recorddirBrowse, 0, 4, 1, 2)
+
+        self.horizontalLayout_6 = QHBoxLayout()
+        self.horizontalLayout_6.setObjectName(u"horizontalLayout_6")
         self.pushButton_coupledrecord_recordStream = QPushButton(self.groupBox_3)
         self.pushButton_coupledrecord_recordStream.setObjectName(u"pushButton_coupledrecord_recordStream")
 
-        self.gridLayout.addWidget(self.pushButton_coupledrecord_recordStream, 1, 4, 1, 2)
+        self.horizontalLayout_6.addWidget(self.pushButton_coupledrecord_recordStream)
+
+        self.pushButton_coupledrecord_snapshot = QPushButton(self.groupBox_3)
+        self.pushButton_coupledrecord_snapshot.setObjectName(u"pushButton_coupledrecord_snapshot")
+
+        self.horizontalLayout_6.addWidget(self.pushButton_coupledrecord_snapshot)
+
+
+        self.gridLayout.addLayout(self.horizontalLayout_6, 1, 4, 1, 2)
 
         self.gridLayout.setColumnStretch(1, 1)
         self.gridLayout.setColumnStretch(3, 1)
+        self.gridLayout.setColumnStretch(5, 1)
 
         self.horizontalLayout_3.addLayout(self.gridLayout)
 
@@ -182,13 +198,14 @@ class Ui_MainWindow(object):
         self.label_2.setText(QCoreApplication.translate("MainWindow", u"Mocap Status", None))
         self.label_status_bmode.setText(QCoreApplication.translate("MainWindow", u"Disconnected", None))
         self.label_status_mocap.setText(QCoreApplication.translate("MainWindow", u"Disconnected", None))
-        self.pushButton_coupledrecord_recorddirClear.setText("")
-        self.lineEdit_coupledrecord_recorddir.setPlaceholderText(QCoreApplication.translate("MainWindow", u"~/output/", None))
         self.label_1.setText(QCoreApplication.translate("MainWindow", u"B-Mode Status", None))
-        self.pushButton_coupledrecord_recorddirBrowse.setText(QCoreApplication.translate("MainWindow", u"Record Dir", None))
         self.label_3.setText(QCoreApplication.translate("MainWindow", u"Record Type", None))
         self.radioButton_mha.setText(QCoreApplication.translate("MainWindow", u".mha", None))
         self.radioButton_imagecsv.setText(QCoreApplication.translate("MainWindow", u"image + .csv", None))
+        self.lineEdit_coupledrecord_recorddir.setPlaceholderText(QCoreApplication.translate("MainWindow", u"~/output/", None))
+        self.pushButton_coupledrecord_recorddirClear.setText("")
+        self.pushButton_coupledrecord_recorddirBrowse.setText(QCoreApplication.translate("MainWindow", u"Record Dir", None))
         self.pushButton_coupledrecord_recordStream.setText(QCoreApplication.translate("MainWindow", u"Record", None))
+        self.pushButton_coupledrecord_snapshot.setText(QCoreApplication.translate("MainWindow", u"Snapshot", None))
     # retranslateUi
 

@@ -88,7 +88,7 @@
            <item>
             <layout class="QHBoxLayout" name="horizontalLayout_3" stretch="0">
              <item>
-              <layout class="QGridLayout" name="gridLayout" columnstretch="0,1,0,1,0,0">
+              <layout class="QGridLayout" name="gridLayout" columnstretch="0,1,0,1,0,1">
                <property name="sizeConstraint">
                 <enum>QLayout::SizeConstraint::SetMinimumSize</enum>
                </property>
@@ -120,37 +120,10 @@
                  </property>
                 </widget>
                </item>
-               <item row="0" column="4">
-                <widget class="QPushButton" name="pushButton_coupledrecord_recorddirClear">
-                 <property name="text">
-                  <string/>
-                 </property>
-                 <property name="icon">
-                  <iconset theme="QIcon::ThemeIcon::EditClear"/>
-                 </property>
-                </widget>
-               </item>
-               <item row="0" column="3">
-                <widget class="QLineEdit" name="lineEdit_coupledrecord_recorddir">
-                 <property name="placeholderText">
-                  <string>~/output/</string>
-                 </property>
-                </widget>
-               </item>
                <item row="0" column="0">
                 <widget class="QLabel" name="label_1">
                  <property name="text">
                   <string>B-Mode Status</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="0" column="5">
-                <widget class="QPushButton" name="pushButton_coupledrecord_recorddirBrowse">
-                 <property name="text">
-                  <string>Record Dir</string>
-                 </property>
-                 <property name="icon">
-                  <iconset theme="QIcon::ThemeIcon::FolderOpen"/>
                  </property>
                 </widget>
                </item>
@@ -182,12 +155,54 @@
                  </item>
                 </layout>
                </item>
-               <item row="1" column="4" colspan="2">
-                <widget class="QPushButton" name="pushButton_coupledrecord_recordStream">
+               <item row="0" column="3">
+                <layout class="QHBoxLayout" name="horizontalLayout_5" stretch="0,0">
+                 <item>
+                  <widget class="QLineEdit" name="lineEdit_coupledrecord_recorddir">
+                   <property name="placeholderText">
+                    <string>~/output/</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QPushButton" name="pushButton_coupledrecord_recorddirClear">
+                   <property name="text">
+                    <string/>
+                   </property>
+                   <property name="icon">
+                    <iconset theme="QIcon::ThemeIcon::EditClear"/>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
+               </item>
+               <item row="0" column="4" colspan="2">
+                <widget class="QPushButton" name="pushButton_coupledrecord_recorddirBrowse">
                  <property name="text">
-                  <string>Record</string>
+                  <string>Record Dir</string>
+                 </property>
+                 <property name="icon">
+                  <iconset theme="QIcon::ThemeIcon::FolderOpen"/>
                  </property>
                 </widget>
+               </item>
+               <item row="1" column="4" colspan="2">
+                <layout class="QHBoxLayout" name="horizontalLayout_6">
+                 <item>
+                  <widget class="QPushButton" name="pushButton_coupledrecord_recordStream">
+                   <property name="text">
+                    <string>Record</string>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QPushButton" name="pushButton_coupledrecord_snapshot">
+                   <property name="text">
+                    <string>Snapshot</string>
+                   </property>
+                  </widget>
+                 </item>
+                </layout>
                </item>
               </layout>
              </item>
