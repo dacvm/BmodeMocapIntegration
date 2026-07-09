@@ -88,7 +88,7 @@
            <item>
             <layout class="QHBoxLayout" name="horizontalLayout_3" stretch="0">
              <item>
-              <layout class="QGridLayout" name="gridLayout" columnstretch="0,1,0,1,0,1">
+              <layout class="QGridLayout" name="gridLayout" columnstretch="0,1,0,2,0,1">
                <property name="sizeConstraint">
                 <enum>QLayout::SizeConstraint::SetMinimumSize</enum>
                </property>
@@ -143,6 +143,13 @@
                    </property>
                    <property name="checked">
                     <bool>true</bool>
+                   </property>
+                  </widget>
+                 </item>
+                 <item>
+                  <widget class="QRadioButton" name="radioButton_mhacsv">
+                   <property name="text">
+                    <string>.mha + .csv</string>
                    </property>
                   </widget>
                  </item>

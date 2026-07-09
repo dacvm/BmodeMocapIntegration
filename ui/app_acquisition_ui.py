@@ -107,6 +107,11 @@ class Ui_MainWindow(object):
 
         self.horizontalLayout_4.addWidget(self.radioButton_mha)
 
+        self.radioButton_mhacsv = QRadioButton(self.groupBox_3)
+        self.radioButton_mhacsv.setObjectName(u"radioButton_mhacsv")
+
+        self.horizontalLayout_4.addWidget(self.radioButton_mhacsv)
+
         self.radioButton_imagecsv = QRadioButton(self.groupBox_3)
         self.radioButton_imagecsv.setObjectName(u"radioButton_imagecsv")
 
@@ -155,7 +160,7 @@ class Ui_MainWindow(object):
         self.gridLayout.addLayout(self.horizontalLayout_6, 1, 4, 1, 2)
 
         self.gridLayout.setColumnStretch(1, 1)
-        self.gridLayout.setColumnStretch(3, 1)
+        self.gridLayout.setColumnStretch(3, 2)
         self.gridLayout.setColumnStretch(5, 1)
 
         self.horizontalLayout_3.addLayout(self.gridLayout)
@@ -201,6 +206,7 @@ class Ui_MainWindow(object):
         self.label_1.setText(QCoreApplication.translate("MainWindow", u"B-Mode Status", None))
         self.label_3.setText(QCoreApplication.translate("MainWindow", u"Record Type", None))
         self.radioButton_mha.setText(QCoreApplication.translate("MainWindow", u".mha", None))
+        self.radioButton_mhacsv.setText(QCoreApplication.translate("MainWindow", u".mha + .csv", None))
         self.radioButton_imagecsv.setText(QCoreApplication.translate("MainWindow", u"image + .csv", None))
         self.lineEdit_coupledrecord_recorddir.setPlaceholderText(QCoreApplication.translate("MainWindow", u"~/output/", None))
         self.pushButton_coupledrecord_recorddirClear.setText("")
