@@ -538,7 +538,8 @@ class AcquisitionMainWindow(QMainWindow):
     def _build_mha_snapshot_output_path(self, record_dir: str) -> str:
         # Normalize path so the one-frame writer receives a stable absolute destination.
         normalized_dir = os.path.abspath(os.path.expanduser(record_dir))
-        timestamp_text = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        # Filename format: keep a compact timestamp so saved MHA files sort chronologically.
+        timestamp_text = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"SequenceSnapshot_{timestamp_text}.mha"
         return os.path.join(normalized_dir, filename)
 
@@ -1226,7 +1227,8 @@ class AcquisitionMainWindow(QMainWindow):
     def _build_mha_output_path(self, record_dir: str) -> str:
         # Normalize path so all writer calls receive a stable absolute directory.
         normalized_dir = os.path.abspath(os.path.expanduser(record_dir))
-        timestamp_text = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        # Filename format: keep a compact timestamp so saved MHA files sort chronologically.
+        timestamp_text = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"SequenceRecording_{timestamp_text}.mha"
         return os.path.join(normalized_dir, filename)
 
