@@ -156,8 +156,8 @@ class VolumeReconstructionRunner(QObject):
     # - Input: `self`, `out_dir` (str).
     # - Returns: Unique output file path (str).
     def _make_unique_output_volume_path(self, out_dir: str) -> str:
-        # Use a timestamped base name so each run keeps its own output.
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        # Use a compact timestamped base name so each run keeps its own output.
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_name = f"VolumeOutput_{timestamp}"
         candidate = os.path.join(out_dir, f"{base_name}.mha")
 

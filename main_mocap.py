@@ -11,7 +11,7 @@ import threading
 import time
 import xml.etree.ElementTree as ElementTree
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Mapping, Optional
 
 # Third-party imports for QTM real-time streaming, numeric transforms, plotting, and Qt UI.
 import qtm_rt
@@ -482,6 +482,23 @@ class CsvRecordWorker:
         return int(now_utc.timestamp() * 1000)
 
     # Summary:
+    # - Format one CSV cell using the mocap recording convention.
+    # - What it does: Keeps integer timestamps exact and writes floats with fixed precision.
+    # - Input: `value` (object).
+    # - Returns: Formatted CSV value (object).
+    @staticmethod
+    def _format_csv_value(value):
+        # Keep integers unchanged so timestamps remain exact.
+        if isinstance(value, int):
+            return value
+        # Format floats with up to 4 decimals and keep NaN readable.
+        if isinstance(value, float):
+            if math.isnan(value):
+                return "NaN"
+            return f"{value:.4f}"
+        return value
+
+    # Summary:
     # - Normalize a quaternion to unit length and provide a safe fallback.
     # - Input: `quat` (tuple[float, float, float, float]).
     # - Returns: Normalized quaternion as (w, x, y, z) (tuple[float, float, float, float]).
@@ -875,21 +892,6 @@ class CsvRecordWorker:
         record_queue: queue.Queue,
         stop_event: threading.Event,
     ) -> None:
-        # Summary:
-        # - Format numeric values for CSV output with fixed decimal precision.
-        # - Input: `value` (object).
-        # - Returns: Formatted value for CSV output (object).
-        def _format_csv_value(value):
-            # Keep integers unchanged so timestamps remain exact.
-            if isinstance(value, int):
-                return value
-            # Format floats with up to 4 decimals and keep NaN readable.
-            if isinstance(value, float):
-                if math.isnan(value):
-                    return "NaN"
-                return f"{value:.4f}"
-            return value
-
         # Wrap file I/O in a try/except so writer errors do not crash the app.
         try:
             with open(file_path, "w", newline="", encoding="utf-8") as csv_file:
@@ -913,7 +915,9 @@ class CsvRecordWorker:
                             continue
 
                     # Format floats on the writer thread to keep the stream thread light.
-                    formatted_row = [_format_csv_value(value) for value in row]
+                    formatted_row = [
+                        CsvRecordWorker._format_csv_value(value) for value in row
+                    ]
                     writer.writerow(formatted_row)
                     rows_since_flush += 1
                     # Flush periodically so data hits disk without per-row overhead.
@@ -2064,6 +2068,85 @@ class MocapWidget(QWidget):
 
         # Fall back to the base name if we somehow exhausted all suffixes.
         return file_path
+
+    # Summary:
+    # - Convert one stored rigid body matrix into CSV pose values.
+    # - What it does: validates a 4x4 pose matrix, converts rotation to quaternion, and
+    #   returns NaN placeholders when the body is missing or invalid.
+    # - Input: `pose_matrix` (object).
+    # - Returns: CSV values `[q1, q2, q3, q4, t1, t2, t3]` (list[float]).
+    @staticmethod
+    def _pose_matrix_to_record_values(pose_matrix: object) -> list[float]:
+        # Missing or malformed bodies keep the row shape stable with NaN placeholders.
+        if not isinstance(pose_matrix, np.ndarray):
+            return [RECORD_NAN] * 7
+        if pose_matrix.shape != (4, 4):
+            return [RECORD_NAN] * 7
+        if not np.isfinite(pose_matrix).all():
+            return [RECORD_NAN] * 7
+
+        # Validation/transform: extract raw QTM-frame rotation and translation.
+        rotation_3x3 = np.asarray(pose_matrix[:3, :3], dtype=float).tolist()
+        translation = np.asarray(pose_matrix[:3, 3], dtype=float)
+        quat = CsvRecordWorker._rotation_matrix_to_quaternion(rotation_3x3)
+        return [
+            float(quat[0]),
+            float(quat[1]),
+            float(quat[2]),
+            float(quat[3]),
+            float(translation[0]),
+            float(translation[1]),
+            float(translation[2]),
+        ]
+
+    # Summary:
+    # - Save one externally-controlled mocap snapshot directly to a CSV file.
+    # - What it does: Creates a one-row CSV using the same header, filename, quaternion,
+    #   and numeric formatting conventions as continuous mocap recording.
+    # - Input: `self`, `record_dir` (str), `ts_ms` (int), `rigidbody_data` (object).
+    # - Returns: Full CSV output path (str).
+    def save_external_csv_snapshot(
+        self, record_dir: str, ts_ms: int, rigidbody_data: object
+    ) -> str:
+        # Validation: snapshot storage expects the coupled rigid body mapping by body name.
+        if not isinstance(rigidbody_data, Mapping):
+            raise ValueError("Snapshot rigid body data is not a body-name mapping")
+
+        # Normalize/create the snapshot directory before building the standard CSV path.
+        normalized_record_dir = os.path.abspath(os.path.expanduser(str(record_dir)))
+        os.makedirs(normalized_record_dir, exist_ok=True)
+
+        # Freeze body order from QTM parameters when available, otherwise use the packet keys.
+        record_body_names = self._stream_worker.body_names_snapshot()
+        if not record_body_names:
+            record_body_names = list(rigidbody_data.keys())
+        if not record_body_names:
+            raise ValueError("Rigid body names are not available for snapshot CSV")
+
+        # Build one CSV row using the coupled rigid body timestamp supplied by the caller.
+        record_file_path = self._build_record_file_path(normalized_record_dir)
+        record_header = self._build_record_header(record_body_names)
+        row = [int(ts_ms)]
+        for body_name in record_body_names:
+            # Missing bodies are represented as NaNs to preserve the existing CSV schema.
+            row.extend(
+                self._pose_matrix_to_record_values(rigidbody_data.get(body_name))
+            )
+
+        # Write one header row and one data row using the same formatter as the worker.
+        with open(record_file_path, "w", newline="", encoding="utf-8") as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(record_header)
+            writer.writerow([CsvRecordWorker._format_csv_value(value) for value in row])
+            csv_file.flush()
+
+        # Log the direct snapshot path so externally-controlled output remains visible.
+        self._log_mocap_event(
+            "snapshot_saved",
+            level="INFO",
+            target=record_file_path,
+        )
+        return record_file_path
 
     # Summary:
     # - Start a CSV recording session requested by an external controller.

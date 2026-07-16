@@ -35,9 +35,9 @@ from helpers.volume_reconstruction_runner import VolumeReconstructionRunner
 DEFAULT_CONFIG_FILE = (
     "configs/PlusDeviceSet_fCal_Epiphan_NDIPolaris_RadboudUMC_20241219_150400.xml"
 )
-DEFAULT_SEQUENCE_FILE = "seqs/SequenceRecording_2024-12-20_14-47-41.mha"
+DEFAULT_SEQUENCE_FILE = "seqs/SequenceRecording_20241220_144741.mha"
 DEFAULT_OUTPUT_DIR = "seqs/"
-DEFAULT_VOLUME_FILE = "seqs/VolumeOutput_2024-12-20_14-48-05.mha"
+DEFAULT_VOLUME_FILE = "seqs/VolumeOutput_20241220_144805.mha"
 VOLUME_THRESHOLD_DEBOUNCE_MS = 100
 
 

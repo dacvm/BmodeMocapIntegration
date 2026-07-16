@@ -1,4 +1,4 @@
-"""Main window wrapper that embeds B-mode, Mocap, and Volume widgets."""
+"""Main window wrapper that embeds B-mode and Mocap widgets for acquisition."""
 
 # Standard library helpers for filesystem normalization and app exit codes.
 from datetime import datetime
@@ -13,28 +13,28 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBo
 
 # Coupler that matches image and rigid body packets by timestamp.
 from helpers.coupled_stream_controller import CoupledStreamController
-# Generated UI class from Qt Designer (do not edit the generated file).
-from ui.app_reconstruction_ui import Ui_MainWindow
 # Sequence writer that exports coupled packets into Plus-style .mha files.
 from helpers.mha_writer import MhaWriter
-# Custom widgets that will be embedded into the main window layouts.
+# Custom widgets that will be embedded into the acquisition main window.
 from main_bmode import BModeWidget
 from main_mocap import MocapWidget
-from main_volume import VolumeWidget
+# Generated UI class from Qt Designer (do not edit the generated file).
+from ui.app_acquisition_ui import Ui_MainWindow
 
 COUPLED_MAXDIFF_IMAGEPOSE_MS = 120
 COUPLED_MOCAP_BUFFER_MAXLEN = 500
+COUPLED_SNAPSHOT_TIMEOUT_MS = 2000
 
 
 # Summary:
-# - Main window wrapper that hosts the reconstruction UI and embeds custom widgets.
-# - What it does: Builds the generated UI, inserts B-mode/Mocap/Volume widgets, and
-#   implements coupled-record directory interactions.
+# - Main window wrapper that hosts the acquisition UI and embeds custom widgets.
+# - What it does: Builds the generated UI, inserts B-mode/Mocap widgets, and
+#   implements coupled-record directory interactions without the volume widget.
 # - Input: `self` (new window instance).
 # - Returns: A fully initialized QMainWindow subclass instance.
-class MainWindow(QMainWindow):
+class AcquisitionMainWindow(QMainWindow):
     # Summary:
-    # - Initialize the main window and wire up the UI behavior.
+    # - Initialize the acquisition main window and wire up the UI behavior.
     # - What it does: Creates the generated UI, embeds custom widgets, adjusts layout
     #   spacing, and connects button signals to slot handlers.
     # - Input: `self` (the new window instance).
@@ -51,18 +51,14 @@ class MainWindow(QMainWindow):
         self.ui.verticalLayout_bmode.setSpacing(4)
         self.ui.verticalLayout_mocap.setContentsMargins(0, 0, 0, 0)
         self.ui.verticalLayout_mocap.setSpacing(4)
-        self.ui.verticalLayout_volume.setContentsMargins(0, 0, 0, 0)
-        self.ui.verticalLayout_volume.setSpacing(4)
 
         # Create custom widgets and keep references to avoid garbage collection.
         self._bmode_widget = BModeWidget()
         self._mocap_widget = MocapWidget()
-        self._volume_widget = VolumeWidget()
 
         # Add custom widgets into their assigned layouts.
         self.ui.verticalLayout_bmode.addWidget(self._bmode_widget)
         self.ui.verticalLayout_mocap.addWidget(self._mocap_widget)
-        self.ui.verticalLayout_volume.addWidget(self._volume_widget)
 
         # UI state change: keep status labels in a known initial state on startup.
         self.ui.label_status_bmode.setText("Disconnected")
@@ -78,9 +74,16 @@ class MainWindow(QMainWindow):
         self._coupled_imagecsv_active = False
         self._imagecsv_session_dir = ""
         self._imagecsv_csv_path = ""
+        # Track the CSV file owned by `.mha + .csv` mode so MHA and CSV stop together.
+        self._mhacsv_csv_path = ""
         # Track stop coordination so queued timestamps can drain before stopping the image writer.
         self._imagecsv_stop_pending = False
         self._imagecsv_stop_reason = ""
+        # Track one-shot coupled snapshot state separately from continuous recording state.
+        self._coupled_snapshot_pending = False
+        self._coupled_snapshot_mode: Optional[str] = None
+        self._coupled_snapshot_record_dir = ""
+        self._suppress_next_coupler_stats_status_update = False
 
         # Create the software coupler for image+pose sample-and-hold matching.
         self._coupler = CoupledStreamController(
@@ -88,11 +91,11 @@ class MainWindow(QMainWindow):
             mocap_buffer_maxlen=COUPLED_MOCAP_BUFFER_MAXLEN,
         )
 
-        # Signal connection: mirror B-mode stream state into the reconstruction status label.
+        # Signal connection: mirror B-mode stream state into the acquisition status label.
         self._bmode_widget._proxy.state_changed.connect(
             self._on_bmodeStreamProxy_state_changed
         )
-        # Signal connection: mirror Mocap stream state into the reconstruction status label.
+        # Signal connection: mirror Mocap stream state into the acquisition status label.
         self._mocap_widget._stream_proxy.state_changed.connect(
             self._on_mocapStreamProxy_state_changed
         )
@@ -124,12 +127,20 @@ class MainWindow(QMainWindow):
         self._imagecsv_stop_timer.timeout.connect(
             self._on_coupledImageCsvStopTimer_timeout
         )
+        # Create a single-shot timer so one-shot snapshots cannot wait forever.
+        self._coupled_snapshot_timer = QTimer(self)
+        self._coupled_snapshot_timer.setObjectName("coupledSnapshotTimeoutTimer")
+        self._coupled_snapshot_timer.setSingleShot(True)
+        # Signal connection: cancel pending snapshot requests when no valid pair arrives.
+        self._coupled_snapshot_timer.timeout.connect(
+            self._on_coupledSnapshotTimeoutTimer_timeout
+        )
         # Signal connection: stop image+csv recording if the image writer reports a failure.
         self._bmode_widget._proxy.record_stop.connect(
             self._on_bmodeStreamProxy_record_stop,
             Qt.QueuedConnection,
         )
-        # Signal connection: stop image+csv recording if the mocap writer reports a failure.
+        # Signal connection: stop image+csv or .mha+csv recording if the CSV writer reports a failure.
         self._mocap_widget._stream_proxy.record_stop.connect(
             self._on_mocapStreamProxy_record_stop,
             Qt.QueuedConnection,
@@ -143,9 +154,13 @@ class MainWindow(QMainWindow):
         self.ui.pushButton_coupledrecord_recorddirClear.clicked.connect(
             self._on_pushButton_coupledrecord_recorddirClear_clicked
         )
-        # Signal connection: run the record stream
+        # Signal connection: run the record stream.
         self.ui.pushButton_coupledrecord_recordStream.clicked.connect(
             self._on_pushButton_coupledrecord_recordStream_clicked
+        )
+        # Signal connection: request exactly one coupled image+pose snapshot.
+        self.ui.pushButton_coupledrecord_snapshot.clicked.connect(
+            self._on_pushButton_coupledrecord_snapshot_clicked
         )
         # UI state change: initialize coupled debug line in the status bar.
         self._update_coupled_debug_status()
@@ -153,7 +168,7 @@ class MainWindow(QMainWindow):
     # Summary:
     # - Toggle both embedded recording indicators for coupled recording state.
     # - What it does: Routes one active/inactive state to both child widgets so the
-    #   reconstruction flow has one place to control recording borders.
+    #   acquisition flow has one place to control recording borders.
     # - Input: `self`, `active` (bool).
     # - Returns: None.
     def _set_coupled_recording_indicators(self, active: bool) -> None:
@@ -163,7 +178,7 @@ class MainWindow(QMainWindow):
 
     # Summary:
     # - Slot function for B-mode stream-state updates from the embedded B-mode widget.
-    # - What it does: Keeps the reconstruction status label synchronized with stream start/stop.
+    # - What it does: Keeps the acquisition status label synchronized with stream start/stop.
     # - Input: `self`, `is_running` (bool), `message` (str).
     # - Returns: None.
     def _on_bmodeStreamProxy_state_changed(self, is_running: bool, message: str) -> None:
@@ -184,18 +199,26 @@ class MainWindow(QMainWindow):
             )
         # Stop coupled recording when one source drops so sessions stay valid.
         if self._coupler.is_recording():
-            had_active_mha_writer = (
-                self._active_record_mode == ".mha" and self._mha_writer is not None
+            final_path, csv_path, had_active_mha_writer = (
+                self._stop_active_mha_recording(
+                    reason="B-mode stream stopped; coupled recording was ended.",
+                    show_error_dialog=True,
+                )
             )
-            self._coupler.stop_recording()
-            # Finalize any active .mha recording so payload and header stay consistent.
-            final_path = self._finalize_active_mha_recording(
-                show_success_message=False,
-                show_error_dialog=True,
-            )
-            if final_path:
+            if final_path and csv_path:
+                self.statusBar().showMessage(
+                    "B-mode stream stopped; partial .mha saved: "
+                    f"{final_path} (CSV: {csv_path})",
+                    9000,
+                )
+            elif final_path:
                 self.statusBar().showMessage(
                     f"B-mode stream stopped; partial .mha saved: {final_path}",
+                    9000,
+                )
+            elif csv_path:
+                self.statusBar().showMessage(
+                    f"B-mode stream stopped; CSV saved: {csv_path}",
                     9000,
                 )
             elif not had_active_mha_writer:
@@ -203,14 +226,10 @@ class MainWindow(QMainWindow):
                     "B-mode stream stopped; coupled recording was ended.",
                     9000,
                 )
-            # UI state change: restore record button text after forced stop.
-            self.ui.pushButton_coupledrecord_recordStream.setText("Record")
-            # UI state change: clear both embedded recording borders after forced .mha stop.
-            self._set_coupled_recording_indicators(active=False)
 
     # Summary:
     # - Slot function for mocap stream-state updates from the embedded mocap widget.
-    # - What it does: Keeps the reconstruction status label synchronized with QTM stream start/stop.
+    # - What it does: Keeps the acquisition status label synchronized with QTM stream start/stop.
     # - Input: `self`, `is_running` (bool), `message` (str).
     # - Returns: None.
     def _on_mocapStreamProxy_state_changed(self, is_running: bool, message: str) -> None:
@@ -231,18 +250,26 @@ class MainWindow(QMainWindow):
             )
         # Stop coupled recording when one source drops so sessions stay valid.
         if self._coupler.is_recording():
-            had_active_mha_writer = (
-                self._active_record_mode == ".mha" and self._mha_writer is not None
+            final_path, csv_path, had_active_mha_writer = (
+                self._stop_active_mha_recording(
+                    reason="Mocap stream stopped; coupled recording was ended.",
+                    show_error_dialog=True,
+                )
             )
-            self._coupler.stop_recording()
-            # Finalize any active .mha recording so payload and header stay consistent.
-            final_path = self._finalize_active_mha_recording(
-                show_success_message=False,
-                show_error_dialog=True,
-            )
-            if final_path:
+            if final_path and csv_path:
+                self.statusBar().showMessage(
+                    "Mocap stream stopped; partial .mha saved: "
+                    f"{final_path} (CSV: {csv_path})",
+                    9000,
+                )
+            elif final_path:
                 self.statusBar().showMessage(
                     f"Mocap stream stopped; partial .mha saved: {final_path}",
+                    9000,
+                )
+            elif csv_path:
+                self.statusBar().showMessage(
+                    f"Mocap stream stopped; CSV saved: {csv_path}",
                     9000,
                 )
             elif not had_active_mha_writer:
@@ -250,10 +277,6 @@ class MainWindow(QMainWindow):
                     "Mocap stream stopped; coupled recording was ended.",
                     9000,
                 )
-            # UI state change: restore record button text after forced stop.
-            self.ui.pushButton_coupledrecord_recordStream.setText("Record")
-            # UI state change: clear both embedded recording borders after forced .mha stop.
-            self._set_coupled_recording_indicators(active=False)
 
     # Summary:
     # - Slot function for B-mode recording stop events from the embedded B-mode widget.
@@ -268,7 +291,7 @@ class MainWindow(QMainWindow):
 
     # Summary:
     # - Slot function for mocap recording stop events from the embedded Mocap widget.
-    # - What it does: Stops image+csv coupled recording when the CSV writer reports a failure.
+    # - What it does: Stops image+csv or `.mha + .csv` recording when the CSV writer reports a failure.
     # - Input: `self`, `reason` (str).
     # - Returns: None.
     def _on_mocapStreamProxy_record_stop(self, reason: str) -> None:
@@ -276,6 +299,44 @@ class MainWindow(QMainWindow):
         if self._coupled_imagecsv_active:
             # Stop both recorders so the coupled session stays consistent.
             self._stop_coupled_imagecsv_recording(reason)
+            return
+        if self._active_record_mode == ".mha + .csv":
+            # Stop the MHA side too when the hybrid CSV writer reports an error.
+            reason_text = str(reason).strip()
+            final_path, csv_path, _ = self._stop_active_mha_recording(
+                reason=reason_text,
+                show_error_dialog=True,
+            )
+            if final_path and csv_path:
+                if reason_text:
+                    message = (
+                        f"{reason_text} Partial .mha saved: {final_path} "
+                        f"(CSV: {csv_path})"
+                    )
+                else:
+                    message = f"Partial .mha saved: {final_path} (CSV: {csv_path})"
+                self.statusBar().showMessage(
+                    message,
+                    9000,
+                )
+            elif final_path:
+                if reason_text:
+                    message = f"{reason_text} Partial .mha saved: {final_path}"
+                else:
+                    message = f"Partial .mha saved: {final_path}"
+                self.statusBar().showMessage(
+                    message,
+                    9000,
+                )
+            elif csv_path:
+                if reason_text:
+                    message = f"{reason_text} CSV saved: {csv_path}"
+                else:
+                    message = f"CSV saved: {csv_path}"
+                self.statusBar().showMessage(
+                    message,
+                    9000,
+                )
 
     # Summary:
     # - Slot function that handles mocap CSV row timestamps during image+csv recording.
@@ -348,10 +409,20 @@ class MainWindow(QMainWindow):
         # Cache the latest diff so status/debug text can show coupling quality.
         self._latest_coupled_diff_ms = int(diff_ms)
         self._update_coupled_debug_status()
-        # During active .mha recording, append this accepted coupled packet to disk.
+        # Snapshot handling: consume exactly one accepted coupled packet and skip
+        # continuous recording logic so one-shot output cannot append extra frames.
+        if self._coupled_snapshot_pending:
+            self._handle_coupled_snapshot_packet(
+                image_ts_ms=image_ts_ms,
+                image_data=image_data,
+                rigidbody_ts_ms=rigidbody_ts_ms,
+                rigidbody_data=rigidbody_data,
+            )
+            return
+        # During active MHA-backed recording, append this accepted coupled packet to disk.
         if (
             self._coupler.is_recording()
-            and self._active_record_mode == ".mha"
+            and self._active_record_mode in (".mha", ".mha + .csv")
             and self._mha_writer is not None
         ):
             try:
@@ -362,17 +433,11 @@ class MainWindow(QMainWindow):
                     rigidbody_data=rigidbody_data,
                 )
             except Exception as exc:
-                # Stop and finalize on write failure to avoid leaving temp payload files behind.
-                if self._coupler.is_recording():
-                    self._coupler.stop_recording()
-                self._finalize_active_mha_recording(
-                    show_success_message=False,
+                # Stop and finalize on write failure so no partial writer keeps running.
+                self._stop_active_mha_recording(
+                    reason=f"Coupled recording stopped because writing failed: {exc}",
                     show_error_dialog=False,
                 )
-                # UI state change: reflect that recording is no longer active.
-                self.ui.pushButton_coupledrecord_recordStream.setText("Record")
-                # UI state change: clear both embedded recording borders because .mha recording ended.
-                self._set_coupled_recording_indicators(active=False)
                 QMessageBox.warning(
                     self,
                     "MHA Write Error",
@@ -394,6 +459,11 @@ class MainWindow(QMainWindow):
         if not isinstance(stats, dict):
             return
         self._latest_coupler_stats = dict(stats)
+        # UI state change: keep final snapshot messages visible when the coupler emits
+        # its trailing stats update after a successful one-shot packet.
+        if self._suppress_next_coupler_stats_status_update:
+            self._suppress_next_coupler_stats_status_update = False
+            return
         self._update_coupled_debug_status()
 
     # Summary:
@@ -411,6 +481,9 @@ class MainWindow(QMainWindow):
             self._latest_coupler_stats.get("count_dropped_stale", 0)
         )
         is_recording = bool(self._latest_coupler_stats.get("is_recording", False))
+        is_snapshot_pending = bool(
+            self._latest_coupler_stats.get("is_snapshot_pending", False)
+        )
 
         # Render diff as "N/A" until the first coupled packet arrives.
         if self._latest_coupled_diff_ms is None:
@@ -419,7 +492,12 @@ class MainWindow(QMainWindow):
             diff_text = f"{self._latest_coupled_diff_ms} ms"
 
         # UI state change: show one compact debug line for coupling success and drop reasons.
-        state_text = "REC" if is_recording else "IDLE"
+        if is_recording:
+            state_text = "REC"
+        elif is_snapshot_pending:
+            state_text = "SNAPSHOT"
+        else:
+            state_text = "IDLE"
         self.statusBar().showMessage(
             "Coupled streaming "
             f"[ {state_text} ] Diff = {diff_text} | "
@@ -429,6 +507,214 @@ class MainWindow(QMainWindow):
         )
 
     # Summary:
+    # - Build a unique coupled session directory path.
+    # - What it does: Uses the existing `coupled_YYYYMMDD_HHMMSS` naming style and adds
+    #   a numeric suffix only when another session already exists for the same second.
+    # - Input: `self`, `record_dir` (str).
+    # - Returns: Full coupled session directory path (str).
+    def _build_coupled_imagecsv_session_dir(self, record_dir: str) -> str:
+        # Normalize the parent directory so downstream writers receive an absolute path.
+        normalized_dir = os.path.abspath(os.path.expanduser(str(record_dir)))
+        timestamp_text = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_session_dir = os.path.join(normalized_dir, f"coupled_{timestamp_text}")
+        if not os.path.exists(base_session_dir):
+            return base_session_dir
+
+        # Avoid failing when two short sessions are created within the same clock second.
+        for suffix in range(1, 1000):
+            candidate = os.path.join(
+                normalized_dir,
+                f"coupled_{timestamp_text}_{suffix:03d}",
+            )
+            if not os.path.exists(candidate):
+                return candidate
+        return base_session_dir
+
+    # Summary:
+    # - Build a timestamped output path for one coupled snapshot `.mha` file.
+    # - What it does: Normalizes the record directory and creates a deterministic snapshot filename.
+    # - Input: `self`, `record_dir` (str).
+    # - Returns: Full `.mha` output path (str).
+    def _build_mha_snapshot_output_path(self, record_dir: str) -> str:
+        # Normalize path so the one-frame writer receives a stable absolute destination.
+        normalized_dir = os.path.abspath(os.path.expanduser(record_dir))
+        # Filename format: keep a compact timestamp so saved MHA files sort chronologically.
+        timestamp_text = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"SequenceSnapshot_{timestamp_text}.mha"
+        return os.path.join(normalized_dir, filename)
+
+    # Summary:
+    # - Reset local UI/state for a completed or canceled coupled snapshot request.
+    # - What it does: clears pending state, stops the timeout timer, re-enables the snapshot
+    #   button, and hides recording indicators when no continuous recording is active.
+    # - Input: `self`.
+    # - Returns: None.
+    def _reset_coupled_snapshot_state(self) -> None:
+        # Stop the timeout timer so a completed snapshot cannot also report a timeout.
+        if self._coupled_snapshot_timer.isActive():
+            self._coupled_snapshot_timer.stop()
+
+        # Clear one-shot state so the next Snapshot click starts from a clean request.
+        self._coupled_snapshot_pending = False
+        self._coupled_snapshot_mode = None
+        self._coupled_snapshot_record_dir = ""
+
+        # UI state change: allow another snapshot request after this one finishes.
+        self.ui.pushButton_coupledrecord_snapshot.setEnabled(True)
+
+        # UI state change: clear snapshot indicators unless a continuous recording owns them.
+        if not self._coupled_imagecsv_active and not self._coupler.is_recording():
+            self._set_coupled_recording_indicators(active=False)
+
+    # Summary:
+    # - Write one coupled packet as a one-frame `.mha` snapshot.
+    # - What it does: starts an MHA writer, appends exactly one coupled packet, finalizes the
+    #   file immediately, and cleans temporary payload state on append failures.
+    # - Input: `self`, coupled packet fields (`image_ts_ms`, `image_data`, `rigidbody_ts_ms`,
+    #   `rigidbody_data`), and `record_dir` (str).
+    # - Returns: Final `.mha` path (str).
+    def _write_coupled_mha_snapshot(
+        self,
+        image_ts_ms: int,
+        image_data: object,
+        rigidbody_ts_ms: int,
+        rigidbody_data: object,
+        record_dir: str,
+    ) -> str:
+        output_mha_path = self._build_mha_snapshot_output_path(record_dir)
+        writer = MhaWriter(invert_transforms=False)
+        writer.start(output_mha_path)
+        finalize_attempted = False
+        try:
+            # Store exactly one accepted coupled packet in the one-frame sequence.
+            writer.append_coupled_packet(
+                image_ts_ms=image_ts_ms,
+                image_data=image_data,
+                rigidbody_ts_ms=rigidbody_ts_ms,
+                rigidbody_data=rigidbody_data,
+            )
+            finalize_attempted = True
+            return writer.finalize()
+        except Exception:
+            # Cleanup: finalize deletes the temporary payload when append failed before finalize.
+            if not finalize_attempted:
+                try:
+                    writer.finalize()
+                except Exception:
+                    pass
+            raise
+
+    # Summary:
+    # - Write one coupled packet as one B-mode JPEG plus one mocap CSV row.
+    # - What it does: creates a coupled session directory, writes one image snapshot under a
+    #   B-mode subfolder, and writes one CSV row using the same rigid body timestamp.
+    # - Input: `self`, coupled packet fields (`image_data`, `rigidbody_ts_ms`, `rigidbody_data`),
+    #   and `record_dir` (str).
+    # - Returns: tuple of `(session_dir, image_path, csv_path)`.
+    def _write_coupled_imagecsv_snapshot(
+        self,
+        image_data: object,
+        rigidbody_ts_ms: int,
+        rigidbody_data: object,
+        record_dir: str,
+    ) -> tuple[str, str, str]:
+        # Build/create the coupled session folder before asking child widgets to write files.
+        session_dir = self._build_coupled_imagecsv_session_dir(record_dir)
+        os.makedirs(session_dir, exist_ok=False)
+
+        # Use the rigid body timestamp for both files so their filenames/row values align.
+        snapshot_ts_ms = int(rigidbody_ts_ms)
+        image_path = self._bmode_widget.save_external_image_snapshot(
+            session_dir,
+            snapshot_ts_ms,
+            image_data,
+        )
+        csv_path = self._mocap_widget.save_external_csv_snapshot(
+            session_dir,
+            snapshot_ts_ms,
+            rigidbody_data,
+        )
+        return session_dir, image_path, csv_path
+
+    # Summary:
+    # - Store one accepted coupled packet for the pending snapshot request.
+    # - What it does: dispatches to the selected snapshot format, resets snapshot state, and
+    #   reports the saved path or write error to the operator.
+    # - Input: `self`, coupled packet fields (`image_ts_ms`, `image_data`, `rigidbody_ts_ms`,
+    #   `rigidbody_data`).
+    # - Returns: None.
+    def _handle_coupled_snapshot_packet(
+        self,
+        image_ts_ms: int,
+        image_data: object,
+        rigidbody_ts_ms: int,
+        rigidbody_data: object,
+    ) -> None:
+        # Snapshot state is copied before reset so writer errors can still report context.
+        snapshot_mode = self._coupled_snapshot_mode
+        snapshot_record_dir = self._coupled_snapshot_record_dir
+        message = ""
+
+        try:
+            # Dispatch to the storage format chosen by the existing radio buttons.
+            if snapshot_mode == ".mha":
+                final_path = self._write_coupled_mha_snapshot(
+                    image_ts_ms=image_ts_ms,
+                    image_data=image_data,
+                    rigidbody_ts_ms=rigidbody_ts_ms,
+                    rigidbody_data=rigidbody_data,
+                    record_dir=snapshot_record_dir,
+                )
+                message = f"Coupled snapshot saved to: {final_path}"
+            elif snapshot_mode == ".mha + .csv":
+                # Hybrid snapshot: write the exact same one-frame MHA and one-row CSV outputs.
+                final_path = self._write_coupled_mha_snapshot(
+                    image_ts_ms=image_ts_ms,
+                    image_data=image_data,
+                    rigidbody_ts_ms=rigidbody_ts_ms,
+                    rigidbody_data=rigidbody_data,
+                    record_dir=snapshot_record_dir,
+                )
+                csv_path = self._mocap_widget.save_external_csv_snapshot(
+                    snapshot_record_dir,
+                    int(rigidbody_ts_ms),
+                    rigidbody_data,
+                )
+                message = (
+                    f"Coupled snapshot saved to: {final_path} "
+                    f"(CSV: {csv_path})"
+                )
+            elif snapshot_mode == "image + .csv":
+                session_dir, image_path, csv_path = self._write_coupled_imagecsv_snapshot(
+                    image_data=image_data,
+                    rigidbody_ts_ms=rigidbody_ts_ms,
+                    rigidbody_data=rigidbody_data,
+                    record_dir=snapshot_record_dir,
+                )
+                message = (
+                    f"Coupled snapshot saved in: {session_dir} "
+                    f"(Image: {image_path}, CSV: {csv_path})"
+                )
+            else:
+                raise ValueError("Snapshot record mode is not selected")
+
+            # UI state change: report the final snapshot destination after writing succeeds.
+            self.statusBar().showMessage(message, 9000)
+        except Exception as exc:
+            # UI state change: surface write failures because no continuous stop path will run.
+            message = f"Coupled snapshot failed: {exc}"
+            self.statusBar().showMessage(message, 9000)
+            QMessageBox.warning(
+                self,
+                "Snapshot Write Error",
+                f"Could not write coupled snapshot:\n{exc}",
+            )
+        finally:
+            # Keep the saved/failed snapshot message visible after the coupler's trailing stats.
+            self._suppress_next_coupler_stats_status_update = True
+            self._reset_coupled_snapshot_state()
+
+    # Summary:
     # - Start an image+csv coupled recording session.
     # - What it does: Creates a session folder, starts B-mode image recording and mocap CSV recording,
     #   connects row timestamps to image snapshots, and updates UI state.
@@ -436,8 +722,7 @@ class MainWindow(QMainWindow):
     # - Returns: True on success, otherwise False (bool).
     def _start_coupled_imagecsv_recording(self, record_dir: str) -> bool:
         # Build a unique session directory to keep images and CSV together.
-        timestamp_text = datetime.now().strftime("%Y%m%d_%H%M%S")
-        session_dir = os.path.join(record_dir, f"coupled_{timestamp_text}")
+        session_dir = self._build_coupled_imagecsv_session_dir(record_dir)
         # Create the session directory so both recorders have a stable base path.
         try:
             os.makedirs(session_dir, exist_ok=False)
@@ -528,6 +813,61 @@ class MainWindow(QMainWindow):
             self._imagecsv_stop_timer.stop()
         self._imagecsv_stop_timer.start(int(drain_ms))
 
+    # Summary:
+    # - Stop the CSV half of an active `.mha + .csv` coupled recording.
+    # - What it does: Stops the mocap CSV writer and clears the cached CSV path while
+    #   leaving `.mha` finalization to the caller.
+    # - Input: `self`, `reason` (str).
+    # - Returns: The CSV path that belonged to the hybrid session, or an empty string.
+    def _stop_coupled_mhacsv_csv_recording(self, reason: str = "") -> str:
+        # Cache the path before stopping so callers can still report the saved CSV.
+        csv_path = self._mhacsv_csv_path
+
+        # Stop the CSV writer even if the path is unexpectedly empty; the worker stop is idempotent.
+        self._mocap_widget.stop_external_csv_record(reason)
+
+        # Clear hybrid CSV state so the next recording starts without stale output paths.
+        self._mhacsv_csv_path = ""
+        return csv_path
+
+    # Summary:
+    # - Stop an active `.mha` or `.mha + .csv` coupled recording.
+    # - What it does: Disarms the coupler, stops the hybrid CSV writer when needed,
+    #   finalizes the active MHA writer, and restores shared recording UI state.
+    # - Input: `self`, `reason` (str), `show_error_dialog` (bool).
+    # - Returns: Tuple `(final_path, csv_path, had_active_mha_writer)`.
+    def _stop_active_mha_recording(
+        self,
+        reason: str,
+        show_error_dialog: bool,
+    ) -> tuple[Optional[str], str, bool]:
+        # Cache mode before finalization because finalization always clears active mode.
+        active_mode = self._active_record_mode
+        had_active_mha_writer = (
+            active_mode in (".mha", ".mha + .csv") and self._mha_writer is not None
+        )
+
+        # Stop the image-triggered coupling gate before closing writers so no new MHA frames append.
+        if self._coupler.is_recording():
+            self._coupler.stop_recording()
+
+        # Hybrid cleanup: stop the mocap CSV writer that runs beside the MHA writer.
+        csv_path = ""
+        if active_mode == ".mha + .csv":
+            csv_path = self._stop_coupled_mhacsv_csv_recording(reason)
+
+        # Finalize active .mha output so payload and header stay consistent.
+        final_path = self._finalize_active_mha_recording(
+            show_success_message=False,
+            show_error_dialog=show_error_dialog,
+        )
+
+        # UI state change: restore button text when MHA-backed recording stops.
+        self.ui.pushButton_coupledrecord_recordStream.setText("Record")
+        # UI state change: clear both embedded recording borders after MHA-backed recording stops.
+        self._set_coupled_recording_indicators(active=False)
+
+        return final_path, csv_path, had_active_mha_writer
 
     # Summary:
     # - Slot function for the record directory clear button.
@@ -560,6 +900,132 @@ class MainWindow(QMainWindow):
             self.ui.lineEdit_coupledrecord_recorddir.setText(path)
 
     # Summary:
+    # - Slot function for the coupled snapshot timeout timer.
+    # - What it does: Cancels a pending one-shot snapshot request when no valid coupled
+    #   packet arrives within the configured timeout window.
+    # - Input: `self`.
+    # - Returns: None.
+    def _on_coupledSnapshotTimeoutTimer_timeout(self) -> None:
+        # Slot function: react to the one-shot snapshot timeout.
+        if not self._coupled_snapshot_pending:
+            return
+
+        # Keep the timeout message visible after cancel_snapshot emits its stats update.
+        self._suppress_next_coupler_stats_status_update = True
+        # Snapshot gate: cancel the pending request so live preview images are ignored again.
+        self._coupler.cancel_snapshot()
+        # UI state change: restore controls and indicators after the timed-out request.
+        self._reset_coupled_snapshot_state()
+        self.statusBar().showMessage(
+            "Coupled snapshot timed out after "
+            f"{COUPLED_SNAPSHOT_TIMEOUT_MS} ms; no valid image+pose packet was saved.",
+            9000,
+        )
+
+    # Summary:
+    # - Slot function for the Snapshot button.
+    # - What it does: validates snapshot prerequisites, arms one pending coupled packet
+    #   request, and starts a timeout so the UI does not wait forever.
+    # - Input: `self`.
+    # - Returns: None.
+    def _on_pushButton_coupledrecord_snapshot_clicked(self) -> None:
+        # Slot function: react to the Snapshot button click.
+        if self._coupled_snapshot_pending:
+            self.statusBar().showMessage("Coupled snapshot is already pending.", 5000)
+            return
+
+        # Validation: block one-shot snapshots while a continuous recording owns the writers.
+        if self._coupled_imagecsv_active or self._coupler.is_recording():
+            QMessageBox.warning(
+                self,
+                "Recording is Currently Active",
+                "Please stop the current coupled recording before taking a snapshot.",
+            )
+            return
+
+        # Validation: ensure a record directory is set before proceeding.
+        record_dir = self.ui.lineEdit_coupledrecord_recorddir.text().strip()
+        if not record_dir:
+            QMessageBox.warning(
+                self,
+                "Record Directory Missing",
+                "Please choose a record directory before taking a snapshot.",
+            )
+            return
+
+        # Validation: require both sources to be streaming so a coupled packet can be created.
+        bmode_state = self.ui.label_status_bmode.text().strip().lower()
+        mocap_state = self.ui.label_status_mocap.text().strip().lower()
+        if "streaming" not in bmode_state or "streaming" not in mocap_state:
+            QMessageBox.warning(
+                self,
+                "Streaming Required",
+                "Start both B-mode and Mocap streaming before taking a snapshot.",
+            )
+            return
+
+        # Defensive check: radio buttons might not exist yet in the UI.
+        if (
+            not hasattr(self.ui, "radioButton_imagecsv")
+            or not hasattr(self.ui, "radioButton_mha")
+            or not hasattr(self.ui, "radioButton_mhacsv")
+        ):
+            QMessageBox.warning(
+                self,
+                "Record Mode Missing",
+                "Record mode controls are not available in the current UI.",
+            )
+            return
+
+        # Normalize/create output directory early so writer errors are explicit.
+        normalized_record_dir = os.path.abspath(os.path.expanduser(record_dir))
+        try:
+            os.makedirs(normalized_record_dir, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "Record Directory Error",
+                f"Could not prepare record directory:\n{exc}",
+            )
+            return
+
+        # Derive selected snapshot format from the existing coupled record radio buttons.
+        if self.ui.radioButton_mha.isChecked():
+            selected_mode = ".mha"
+        elif self.ui.radioButton_mhacsv.isChecked():
+            selected_mode = ".mha + .csv"
+        elif self.ui.radioButton_imagecsv.isChecked():
+            selected_mode = "image + .csv"
+        else:
+            QMessageBox.warning(
+                self,
+                "Record Mode Missing",
+                "Choose .mha, .mha + .csv, or image + .csv before taking a snapshot.",
+            )
+            return
+
+        # Cache one-shot state before arming the coupler so the accepted packet can be stored.
+        self._coupled_snapshot_pending = True
+        self._coupled_snapshot_mode = selected_mode
+        self._coupled_snapshot_record_dir = normalized_record_dir
+        self._suppress_next_coupler_stats_status_update = False
+        self._latest_coupled_diff_ms = None
+
+        # UI state change: prevent duplicate requests and show temporary snapshot activity.
+        self.ui.pushButton_coupledrecord_snapshot.setEnabled(False)
+        self._set_coupled_recording_indicators(active=True)
+
+        # Snapshot gate: let the next valid image-triggered coupled packet pass through.
+        self._coupler.request_snapshot()
+        if self._coupled_snapshot_timer.isActive():
+            self._coupled_snapshot_timer.stop()
+        self._coupled_snapshot_timer.start(COUPLED_SNAPSHOT_TIMEOUT_MS)
+        self.statusBar().showMessage(
+            f"Coupled snapshot requested ({selected_mode}). Waiting for one valid packet...",
+            9000,
+        )
+
+    # Summary:
     # - Slot function for the Record button.
     # - What it does: Toggles coupled recording, validates prerequisites on start,
     #   and controls the CoupledStreamController recording gate.
@@ -567,28 +1033,39 @@ class MainWindow(QMainWindow):
     # - Returns: None.
     def _on_pushButton_coupledrecord_recordStream_clicked(self) -> None:
         # Slot function: react to the Record button click.
+        # Validation: avoid starting/stopping continuous recording while a one-shot request is active.
+        if self._coupled_snapshot_pending:
+            QMessageBox.warning(
+                self,
+                "Snapshot Pending",
+                "Wait for the coupled snapshot to finish before recording.",
+            )
+            return
         # Toggle behavior: stop immediately if image+csv recording is currently active.
         if self._coupled_imagecsv_active:
             self._stop_coupled_imagecsv_recording("Recording stopped.")
             return
         # Toggle behavior: stop immediately if coupled recording is currently active.
         if self._coupler.is_recording():
-            had_active_mha_writer = (
-                self._active_record_mode == ".mha" and self._mha_writer is not None
+            final_path, csv_path, had_active_mha_writer = (
+                self._stop_active_mha_recording(
+                    reason="Recording stopped.",
+                    show_error_dialog=True,
+                )
             )
-            self._coupler.stop_recording()
-            # Finalize active .mha output now that recording has ended.
-            final_path = self._finalize_active_mha_recording(
-                show_success_message=False,
-                show_error_dialog=True,
-            )
-            # UI state change: restore button text when recording stops.
-            self.ui.pushButton_coupledrecord_recordStream.setText("Record")
-            # UI state change: clear both embedded recording borders after .mha recording stops.
-            self._set_coupled_recording_indicators(active=False)
-            if final_path:
+            if final_path and csv_path:
+                self.statusBar().showMessage(
+                    f"Coupled recording saved to: {final_path} (CSV: {csv_path})",
+                    9000,
+                )
+            elif final_path:
                 self.statusBar().showMessage(
                     f"Coupled recording saved to: {final_path}",
+                    9000,
+                )
+            elif csv_path:
+                self.statusBar().showMessage(
+                    f"Coupled CSV saved to: {csv_path}",
                     9000,
                 )
             elif not had_active_mha_writer:
@@ -620,8 +1097,10 @@ class MainWindow(QMainWindow):
             return
 
         # Defensive check: radio buttons might not exist yet in the UI.
-        if not hasattr(self.ui, "radioButton_imagecsv") or not hasattr(
-            self.ui, "radioButton_mha"
+        if (
+            not hasattr(self.ui, "radioButton_imagecsv")
+            or not hasattr(self.ui, "radioButton_mha")
+            or not hasattr(self.ui, "radioButton_mhacsv")
         ):
             QMessageBox.warning(
                 self,
@@ -642,7 +1121,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Derive selected mode and initialize writer only for .mha mode.
+        # Derive selected mode and initialize only the writers needed for that mode.
         if self.ui.radioButton_imagecsv.isChecked():
             selected_mode = "image + .csv"
             self._mha_writer = None
@@ -651,8 +1130,12 @@ class MainWindow(QMainWindow):
             if not self._start_coupled_imagecsv_recording(normalized_record_dir):
                 self._active_record_mode = None
             return
-        if self.ui.radioButton_mha.isChecked():
-            selected_mode = ".mha"
+        if self.ui.radioButton_mha.isChecked() or self.ui.radioButton_mhacsv.isChecked():
+            # Hybrid mode uses the exact same MHA writer path as the MHA-only option.
+            if self.ui.radioButton_mhacsv.isChecked():
+                selected_mode = ".mha + .csv"
+            else:
+                selected_mode = ".mha"
             output_mha_path = self._build_mha_output_path(normalized_record_dir)
             writer = MhaWriter(invert_transforms=False)
             # writer = MhaWriter(invert_transforms=True)
@@ -669,11 +1152,60 @@ class MainWindow(QMainWindow):
                 )
                 return
             self._mha_writer = writer
-            self._active_record_mode = ".mha"
+            self._active_record_mode = selected_mode
+
+            # Hybrid mode starts the standard mocap CSV writer beside the MHA writer.
+            if selected_mode == ".mha + .csv":
+                try:
+                    csv_path = self._mocap_widget.start_external_csv_record(
+                        normalized_record_dir
+                    )
+                except Exception as exc:
+                    # Cleanup: stop any half-started CSV worker and remove the temporary MHA payload.
+                    self._mocap_widget.stop_external_csv_record(
+                        "CSV record start failed."
+                    )
+                    try:
+                        writer.finalize()
+                    except Exception:
+                        pass
+                    self._mha_writer = None
+                    self._active_record_mode = None
+                    self._mhacsv_csv_path = ""
+                    QMessageBox.warning(
+                        self,
+                        "CSV Record Start Failed",
+                        f"Could not start mocap CSV recording:\n{exc}",
+                    )
+                    return
+                if not csv_path:
+                    # Cleanup: stop any half-started CSV worker and remove the temporary MHA payload.
+                    self._mocap_widget.stop_external_csv_record(
+                        "CSV record start failed."
+                    )
+                    try:
+                        writer.finalize()
+                    except Exception:
+                        pass
+                    self._mha_writer = None
+                    self._active_record_mode = None
+                    self._mhacsv_csv_path = ""
+                    QMessageBox.warning(
+                        self,
+                        "CSV Record Start Failed",
+                        "Could not start mocap CSV recording.",
+                    )
+                    return
+                self._mhacsv_csv_path = csv_path
         else:
-            selected_mode = "unknown"
             self._mha_writer = None
             self._active_record_mode = None
+            QMessageBox.warning(
+                self,
+                "Record Mode Missing",
+                "Choose .mha, .mha + .csv, or image + .csv before recording.",
+            )
+            return
 
         # Start coupling session so incoming image packets produce coupled packets.
         self._coupler.start_recording()
@@ -701,7 +1233,7 @@ class MainWindow(QMainWindow):
         return os.path.join(normalized_dir, filename)
 
     # Summary:
-    # - Finalize and clear the active `.mha` writer session if one is running.
+    # - Finalize and clear the active MHA-backed writer session if one is running.
     # - What it does: Calls `MhaWriter.finalize()` with error handling, updates status/UI feedback,
     #   and always clears writer state so future recordings start cleanly.
     # - Input: `self`, `show_success_message` (bool), `show_error_dialog` (bool).
@@ -713,8 +1245,11 @@ class MainWindow(QMainWindow):
     ) -> Optional[str]:
         final_path = None
 
-        # No-op when current record mode is not .mha or writer was never created.
-        if self._active_record_mode != ".mha" or self._mha_writer is None:
+        # No-op when current record mode is not MHA-backed or writer was never created.
+        if (
+            self._active_record_mode not in (".mha", ".mha + .csv")
+            or self._mha_writer is None
+        ):
             self._mha_writer = None
             self._active_record_mode = None
             return None
@@ -763,12 +1298,15 @@ class MainWindow(QMainWindow):
             )
         # Stop coupling so queued packets are ignored during window teardown.
         if self._coupler.is_recording():
-            self._coupler.stop_recording()
             # Finalize best-effort on close to keep the current recording recoverable.
-            self._finalize_active_mha_recording(
-                show_success_message=False,
+            self._stop_active_mha_recording(
+                reason="Recording stopped because the window closed.",
                 show_error_dialog=False,
             )
+        # Cancel a pending snapshot so queued image packets do not write during teardown.
+        if self._coupled_snapshot_pending:
+            self._coupler.cancel_snapshot()
+            self._reset_coupled_snapshot_state()
         # UI state change: restore record button text on shutdown.
         self.ui.pushButton_coupledrecord_recordStream.setText("Record")
         # UI state change: final safety reset for both embedded recording borders on shutdown.
@@ -780,16 +1318,16 @@ class MainWindow(QMainWindow):
 
 
 # Summary:
-# - Entry point for launching the reconstruction main window.
-# - What it does: Creates the QApplication, shows the MainWindow, and starts the Qt loop.
+# - Entry point for launching the acquisition main window.
+# - What it does: Creates the QApplication, shows the AcquisitionMainWindow, and starts the Qt loop.
 # - Input: None.
 # - Returns: Process exit code (int).
 def main() -> int:
     # Create the Qt application instance so widgets can be shown.
     app = QApplication(sys.argv)
-    # Create and show the main window wrapper.
-    window = MainWindow()
-    window.show()    
+    # Create and show the acquisition main window wrapper.
+    window = AcquisitionMainWindow()
+    window.show()
     # Run the Qt event loop and return its exit code.
     return app.exec()
 
