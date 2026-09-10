@@ -129,14 +129,14 @@ class MhaWriter:
     # - What it does: Validates image payload and rigid body transforms, streams image bytes to temp
     #   storage, and caches small per-frame metadata for final header generation.
     # - Input: coupled packet fields (`image_ts_ms`, `image_data`, `rigidbody_ts_ms`, `rigidbody_data`).
-    # - Returns: None.
+    # - Returns: True for a stored frame, False when image validation skips it.
     def append_coupled_packet(
         self,
         image_ts_ms: int,
         image_data: object,
         rigidbody_ts_ms: int,
         rigidbody_data: object,
-    ) -> None:
+    ) -> bool:
         # Ensure append is only used after start() and before finalize().
         if self._payload_fp is None or self._temp_payload_path is None:
             raise RuntimeError("MhaWriter session not started")
@@ -145,26 +145,26 @@ class MhaWriter:
         width, height, image_bytes = self._extract_image_payload(image_data)
         # Skip packets we cannot validate as single-channel uint8 frame payloads.
         if image_bytes is None:
-            return
+            return False
 
         if self._width is None or self._height is None:
             # First accepted frame defines sequence image dimensions and local time zero.
             if width is None or height is None or width <= 0 or height <= 0:
-                return
+                return False
             self._width = int(width)
             self._height = int(height)
             self._t0_image_ts_ms = int(image_ts_ms)
         else:
             # Enforce fixed dimensions for all stored frames to keep DimSize valid.
             if width is not None and int(width) != self._width:
-                return
+                return False
             if height is not None and int(height) != self._height:
-                return
+                return False
 
         expected_size = int(self._width) * int(self._height)
         # Skip incomplete payload packets so sequence payload size stays exact.
         if len(image_bytes) != expected_size:
-            return
+            return False
 
         if self._t0_image_ts_ms is None:
             self._t0_image_ts_ms = int(image_ts_ms)
@@ -200,6 +200,12 @@ class MhaWriter:
                 image_status="OK",
             )
         )
+        return True
+
+    @property
+    def frame_count(self) -> int:
+        """Return stored frames before finalize resets this session's metadata."""
+        return len(self._frame_metadata)
 
     # Summary:
     # - Finalize the active write session and build the final `.mha` file.

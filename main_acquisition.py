@@ -17,7 +17,7 @@ from helpers.coupled_stream_controller import CoupledStreamController
 from helpers.mha_writer import MhaWriter
 # Custom widgets that will be embedded into the acquisition main window.
 from main_bmode import BModeWidget
-from main_mocap import MocapWidget
+from main_mocap import CoupledCsvWriter, MocapWidget
 # Generated UI class from Qt Designer (do not edit the generated file).
 from ui.app_acquisition_ui import Ui_MainWindow
 
@@ -76,6 +76,8 @@ class AcquisitionMainWindow(QMainWindow):
         self._imagecsv_csv_path = ""
         # Track the CSV file owned by `.mha + .csv` mode so MHA and CSV stop together.
         self._mhacsv_csv_path = ""
+        self._coupled_csv_writer: Optional[CoupledCsvWriter] = None
+        self._mha_recording_error = ""
         # Track stop coordination so queued timestamps can drain before stopping the image writer.
         self._imagecsv_stop_pending = False
         self._imagecsv_stop_reason = ""
@@ -112,7 +114,8 @@ class AcquisitionMainWindow(QMainWindow):
         # Signal connection: show coupled packet timing for debug visibility.
         self._coupler.sig_coupled_packet.connect(
             self._on_coupledStreamController_coupled_packet,
-            Qt.QueuedConnection,
+            # Both objects live on the UI thread. Finish the pair before Stop can run.
+            Qt.DirectConnection,
         )
         # Signal connection: show coupling drop counters for debug visibility.
         self._coupler.sig_stats.connect(
@@ -140,7 +143,7 @@ class AcquisitionMainWindow(QMainWindow):
             self._on_bmodeStreamProxy_record_stop,
             Qt.QueuedConnection,
         )
-        # Signal connection: stop image+csv or .mha+csv recording if the CSV writer reports a failure.
+        # Signal connection: stop image+csv if its independent CSV writer fails.
         self._mocap_widget._stream_proxy.record_stop.connect(
             self._on_mocapStreamProxy_record_stop,
             Qt.QueuedConnection,
@@ -291,7 +294,7 @@ class AcquisitionMainWindow(QMainWindow):
 
     # Summary:
     # - Slot function for mocap recording stop events from the embedded Mocap widget.
-    # - What it does: Stops image+csv or `.mha + .csv` recording when the CSV writer reports a failure.
+    # - What it does: Stops image+csv when its independent CSV worker reports a failure.
     # - Input: `self`, `reason` (str).
     # - Returns: None.
     def _on_mocapStreamProxy_record_stop(self, reason: str) -> None:
@@ -300,43 +303,6 @@ class AcquisitionMainWindow(QMainWindow):
             # Stop both recorders so the coupled session stays consistent.
             self._stop_coupled_imagecsv_recording(reason)
             return
-        if self._active_record_mode == ".mha + .csv":
-            # Stop the MHA side too when the hybrid CSV writer reports an error.
-            reason_text = str(reason).strip()
-            final_path, csv_path, _ = self._stop_active_mha_recording(
-                reason=reason_text,
-                show_error_dialog=True,
-            )
-            if final_path and csv_path:
-                if reason_text:
-                    message = (
-                        f"{reason_text} Partial .mha saved: {final_path} "
-                        f"(CSV: {csv_path})"
-                    )
-                else:
-                    message = f"Partial .mha saved: {final_path} (CSV: {csv_path})"
-                self.statusBar().showMessage(
-                    message,
-                    9000,
-                )
-            elif final_path:
-                if reason_text:
-                    message = f"{reason_text} Partial .mha saved: {final_path}"
-                else:
-                    message = f"Partial .mha saved: {final_path}"
-                self.statusBar().showMessage(
-                    message,
-                    9000,
-                )
-            elif csv_path:
-                if reason_text:
-                    message = f"{reason_text} CSV saved: {csv_path}"
-                else:
-                    message = f"CSV saved: {csv_path}"
-                self.statusBar().showMessage(
-                    message,
-                    9000,
-                )
 
     # Summary:
     # - Slot function that handles mocap CSV row timestamps during image+csv recording.
@@ -426,26 +392,25 @@ class AcquisitionMainWindow(QMainWindow):
             and self._mha_writer is not None
         ):
             try:
-                self._mha_writer.append_coupled_packet(
+                csv_row = None
+                if self._active_record_mode == ".mha + .csv":
+                    if self._coupled_csv_writer is None:
+                        raise RuntimeError("Coupled CSV writer is not open")
+                    csv_row = self._coupled_csv_writer.prepare_row(rigidbody_data)
+                stored = self._mha_writer.append_coupled_packet(
                     image_ts_ms=image_ts_ms,
                     image_data=image_data,
                     rigidbody_ts_ms=rigidbody_ts_ms,
                     rigidbody_data=rigidbody_data,
                 )
+                if stored and csv_row is not None:
+                    self._coupled_csv_writer.append_row(csv_row)
             except Exception as exc:
+                self._mha_recording_error = str(exc)
                 # Stop and finalize on write failure so no partial writer keeps running.
                 self._stop_active_mha_recording(
                     reason=f"Coupled recording stopped because writing failed: {exc}",
-                    show_error_dialog=False,
-                )
-                QMessageBox.warning(
-                    self,
-                    "MHA Write Error",
-                    f"Coupled recording stopped because writing failed:\n{exc}",
-                )
-                self.statusBar().showMessage(
-                    f"Coupled recording stopped due to .mha write error: {exc}",
-                    9000,
+                    show_error_dialog=True,
                 )
 
     # Summary:
@@ -459,6 +424,9 @@ class AcquisitionMainWindow(QMainWindow):
         if not isinstance(stats, dict):
             return
         self._latest_coupler_stats = dict(stats)
+        # Queued stats must not hide an incomplete-recording error after shutdown.
+        if self._mha_recording_error and not self._coupler.is_recording() and not self._coupled_snapshot_pending:
+            return
         # UI state change: keep final snapshot messages visible when the coupler emits
         # its trailing stats update after a successful one-shot packet.
         if self._suppress_next_coupler_stats_status_update:
@@ -823,11 +791,12 @@ class AcquisitionMainWindow(QMainWindow):
         # Cache the path before stopping so callers can still report the saved CSV.
         csv_path = self._mhacsv_csv_path
 
-        # Stop the CSV writer even if the path is unexpectedly empty; the worker stop is idempotent.
-        self._mocap_widget.stop_external_csv_record(reason)
-
-        # Clear hybrid CSV state so the next recording starts without stale output paths.
+        # Release session ownership even if flushing/closing raises an error.
+        writer = self._coupled_csv_writer
+        self._coupled_csv_writer = None
         self._mhacsv_csv_path = ""
+        if writer is not None:
+            writer.close()
         return csv_path
 
     # Summary:
@@ -851,22 +820,50 @@ class AcquisitionMainWindow(QMainWindow):
         if self._coupler.is_recording():
             self._coupler.stop_recording()
 
-        # Hybrid cleanup: stop the mocap CSV writer that runs beside the MHA writer.
+        # Capture counts before either writer is finalized and resets its state.
+        errors = [self._mha_recording_error] if self._mha_recording_error else []
+        csv_output_path = self._mhacsv_csv_path
+        frame_count = self._mha_writer.frame_count if self._mha_writer is not None else 0
+        csv_writer = self._coupled_csv_writer
+        if active_mode == ".mha + .csv":
+            if csv_writer is None:
+                errors.append("Coupled CSV writer is missing")
+            elif frame_count != csv_writer.row_count:
+                errors.append(f"Saved counts differ: {frame_count} MHA frames, {csv_writer.row_count} CSV rows")
+
+        # Always attempt both closes, even when the first one fails.
         csv_path = ""
         if active_mode == ".mha + .csv":
-            csv_path = self._stop_coupled_mhacsv_csv_recording(reason)
+            try:
+                csv_path = self._stop_coupled_mhacsv_csv_recording(reason)
+            except Exception as exc:
+                errors.append(f"CSV close failed: {exc}")
 
         # Finalize active .mha output so payload and header stay consistent.
         final_path = self._finalize_active_mha_recording(
             show_success_message=False,
-            show_error_dialog=show_error_dialog,
+            show_error_dialog=False,
         )
+        if had_active_mha_writer and final_path is None:
+            errors.append(self._mha_recording_error or "MHA finalization failed")
 
         # UI state change: restore button text when MHA-backed recording stops.
         self.ui.pushButton_coupledrecord_recordStream.setText("Record")
         # UI state change: clear both embedded recording borders after MHA-backed recording stops.
         self._set_coupled_recording_indicators(active=False)
 
+        if errors:
+            self._mha_recording_error = "; ".join(dict.fromkeys(errors))
+            message = "Recording incomplete: " + self._mha_recording_error
+            if final_path:
+                message += f"\nRecoverable MHA: {final_path}"
+            if csv_output_path:
+                message += f"\nCSV output (may be incomplete): {csv_output_path}"
+            self.statusBar().showMessage(message, 15000)
+            if show_error_dialog:
+                QMessageBox.warning(self, "Recording Incomplete", message)
+            # Callers must not overwrite the error with a successful-save message.
+            return None, "", had_active_mha_writer
         return final_path, csv_path, had_active_mha_writer
 
     # Summary:
@@ -1154,17 +1151,15 @@ class AcquisitionMainWindow(QMainWindow):
             self._mha_writer = writer
             self._active_record_mode = selected_mode
 
-            # Hybrid mode starts the standard mocap CSV writer beside the MHA writer.
+            self._mha_recording_error = ""
+            # Hybrid CSV rows are supplied only by the accepted coupled-packet handler.
             if selected_mode == ".mha + .csv":
                 try:
-                    csv_path = self._mocap_widget.start_external_csv_record(
+                    self._coupled_csv_writer = self._mocap_widget.start_coupled_csv_record(
                         normalized_record_dir
                     )
                 except Exception as exc:
-                    # Cleanup: stop any half-started CSV worker and remove the temporary MHA payload.
-                    self._mocap_widget.stop_external_csv_record(
-                        "CSV record start failed."
-                    )
+                    # The CSV constructor closes on failure; discard the empty MHA session.
                     try:
                         writer.finalize()
                     except Exception:
@@ -1178,25 +1173,7 @@ class AcquisitionMainWindow(QMainWindow):
                         f"Could not start mocap CSV recording:\n{exc}",
                     )
                     return
-                if not csv_path:
-                    # Cleanup: stop any half-started CSV worker and remove the temporary MHA payload.
-                    self._mocap_widget.stop_external_csv_record(
-                        "CSV record start failed."
-                    )
-                    try:
-                        writer.finalize()
-                    except Exception:
-                        pass
-                    self._mha_writer = None
-                    self._active_record_mode = None
-                    self._mhacsv_csv_path = ""
-                    QMessageBox.warning(
-                        self,
-                        "CSV Record Start Failed",
-                        "Could not start mocap CSV recording.",
-                    )
-                    return
-                self._mhacsv_csv_path = csv_path
+                self._mhacsv_csv_path = self._coupled_csv_writer.file_path
         else:
             self._mha_writer = None
             self._active_record_mode = None
@@ -1230,7 +1207,13 @@ class AcquisitionMainWindow(QMainWindow):
         # Filename format: keep a compact timestamp so saved MHA files sort chronologically.
         timestamp_text = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"SequenceRecording_{timestamp_text}.mha"
-        return os.path.join(normalized_dir, filename)
+        output_path = os.path.join(normalized_dir, filename)
+        # A quick stop/restart in the same second must not overwrite the previous pair.
+        suffix = 1
+        while os.path.exists(output_path):
+            output_path = os.path.join(normalized_dir, f"SequenceRecording_{timestamp_text}_{suffix:03d}.mha")
+            suffix += 1
+        return output_path
 
     # Summary:
     # - Finalize and clear the active MHA-backed writer session if one is running.
@@ -1264,6 +1247,7 @@ class AcquisitionMainWindow(QMainWindow):
                 )
         except Exception as exc:
             # Surface finalize failures because they can indicate incomplete recording output.
+            self._mha_recording_error = f"MHA finalization failed: {exc}"
             self.statusBar().showMessage(
                 f"Failed to finalize coupled .mha recording: {exc}",
                 9000,
