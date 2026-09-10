@@ -933,6 +933,59 @@ class CsvRecordWorker:
 
 
 # Summary:
+# - CSV session whose rows come only from accepted image/pose pairs.
+class CoupledCsvWriter:
+    """Write only the poses selected for saved images, on the caller's thread."""
+
+    def __init__(self, file_path: str, body_names: list[str]) -> None:
+        """Open one session and freeze the same body columns used by snapshots."""
+        if not body_names:
+            raise ValueError("Rigid body names are not available for coupled CSV")
+        self.file_path = file_path
+        self.body_names = tuple(body_names)
+        self.row_count = 0
+        self._previous_quaternions = {}
+        self._file = open(file_path, "w", newline="", encoding="utf-8")
+        try:
+            self._writer = csv.writer(self._file)
+            self._writer.writerow(MocapWidget._build_record_header(self.body_names))
+            # Detect header-write failures before the recording gate opens.
+            self._file.flush()
+        except Exception:
+            self._file.close()
+            raise
+
+    def prepare_row(self, rigidbody_data: object) -> list:
+        """Convert this selected pose packet; UTC describes row construction time."""
+        if not isinstance(rigidbody_data, Mapping):
+            raise ValueError("Coupled rigid body data is not a body-name mapping")
+        row = [CsvRecordWorker._utc_epoch_ms()]
+        for name in self.body_names:
+            values = MocapWidget._pose_matrix_to_record_values(rigidbody_data.get(name))
+            previous = self._previous_quaternions.get(name)
+            if previous is not None and sum(a * b for a, b in zip(previous, values[:4])) < 0:
+                values[:4] = [-value for value in values[:4]]
+            row.extend(values)
+        return row
+
+    def append_row(self, row: list) -> None:
+        """Append after the MHA accepts its frame; propagate any write failure."""
+        self._writer.writerow([CsvRecordWorker._format_csv_value(value) for value in row])
+        self.row_count += 1
+        # Advance sign continuity only for stored rows, not skipped image packets.
+        for index, name in enumerate(self.body_names):
+            quaternion = row[1 + index * 7:5 + index * 7]
+            if all(math.isfinite(value) for value in quaternion):
+                self._previous_quaternions[name] = quaternion
+        if self.row_count % RECORD_FLUSH_EVERY == 0:
+            self._file.flush()
+
+    def close(self) -> None:
+        """Flush and close; let the session owner report close failures."""
+        self._file.close()
+
+
+# Summary:
 # - Worker that owns the asyncio loop and QTM streaming thread.
 # - What it does: connects to QTM, streams packets, and forwards data through MocapStreamProxy.
 class QtmStreamWorker:
@@ -2148,12 +2201,20 @@ class MocapWidget(QWidget):
         )
         return record_file_path
 
+    def start_coupled_csv_record(self, record_dir: str) -> CoupledCsvWriter:
+        """Open a CSV owned by image-triggered recording, not the QTM recorder."""
+        if self._stream_state != "streaming":
+            raise ValueError("Start mocap streaming before recording")
+        if self._record_worker.is_active():
+            raise ValueError("A mocap recording is already active")
+        body_names = self._stream_worker.body_names_snapshot()
+        if not body_names:
+            body_names = list(self._latest_poses_qtm or {})
+        return CoupledCsvWriter(self._build_record_file_path(record_dir), body_names)
+
     # Summary:
-    # - Start a CSV recording session requested by an external controller.
-    # - What it does: Validates streaming state and record directory, builds the CSV schema,
-    #   starts the writer thread, and returns the active CSV file path.
-    # - Input: `self`, `record_dir` (str).
-    # - Returns: Full CSV file path on success, otherwise an empty string (str).
+    # - Start the independent, QTM-driven CSV recorder for existing callers.
+    # - Returns: Full CSV file path on success, otherwise an empty string.
     def start_external_csv_record(self, record_dir: str) -> str:
         # Validation: require an active stream so recording stays aligned to live packets.
         if self._stream_state != "streaming":
