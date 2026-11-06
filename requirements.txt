@@ -1,0 +1,16 @@
+# Python 3.13 (tested). Versions match the development conda env "learning_pyside6".
+
+# Qt GUI framework (widgets, signals, generated .ui classes)
+PySide6>=6.10.1
+
+# Video capture from the frame grabber and image handling (main_bmode.py)
+opencv-python>=4.12.0
+
+# Numeric arrays, pose transforms, volume data
+numpy>=2.4.1
+
+# Embedded 3D plots for mocap and volume views
+matplotlib>=3.10.8
+
+# Qualisys Track Manager real-time streaming client (main_mocap.py)
+qtm-rt>=3.0.2
